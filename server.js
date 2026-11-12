@@ -384,6 +384,7 @@ function streamResubscribe() {
     },
     onSubscriptionError: (code, msg) => {
       console.warn('[LS] subscription error', code, msg);
+      stream.subError = { code, msg, at: new Date().toISOString(), items: epics };
       if (code === 21 && !chart) {
         console.log('[LS] MARKET items not permitted on this account → using CHART:<epic>:TICK');
         stream.itemMode = 'CHART';
@@ -1285,6 +1286,11 @@ app.get('/api/status', wrap(async (req, res) => {
   res.json({
     mode: MOCK ? 'MOCK' : env('IG_ENV', 'DEMO').toUpperCase(),
     account: session.accountId, stream: stream.status, allowance, defaults,
+    itemMode: stream.itemMode || 'MARKET', subError: stream.subError || null,
+    live: [...stream.epics].map((epic) => {
+      const t = stream.last.get(epic);
+      return { epic, lastTickSecAgo: t ? Math.round((Date.now() - t.t) / 1000) : null, bid: t?.bid ?? null, offer: t?.offer ?? null, state: t?.state ?? null };
+    }),
   });
 }));
 
