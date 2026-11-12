@@ -130,7 +130,7 @@
       root.addEventListener('touchstart', () => this.shell.activate(this), { capture: true, passive: true });
       this.el.addEventListener('wheel', () => { this.navAt = Date.now(); }, { capture: true, passive: true });
       this.el.addEventListener('pointerdown', () => { this.navDown = true; }, true);
-      window.addEventListener('pointerup', () => { if (this.navDown) { this.navDown = false; this.navAt = Date.now(); } });
+      window.addEventListener('pointerup', () => { if (this.navDown) { this.navDown = false; this.navAt = Date.now(); this.queueSaveView(); } });
       this.chart.timeScale().subscribeVisibleLogicalRangeChange((r) => {
         if (r && !this.syncing) this.syncPanes(this.chart, r);
         if (!this.applyingRange && (this.navDown || Date.now() - (this.navAt || 0) < 400)) { this.userNavAt = Date.now(); this.queueSaveView(); }
@@ -205,6 +205,7 @@
       this.mainKind = kind;
       // like TradingView, keep visible AI Chance labels inside the auto-scaled price range
       this.overlay.applyOptions({ autoscaleInfoProvider: (orig) => {
+        if (this.pinRange) return { priceRange: this.pinRange };
         const base = this.lockedRange(orig());
         if (this.state.lockRatio) return base;
         const L = this.state.ac && this.acLabels;
@@ -349,6 +350,7 @@
         const reanchor = () => { if (seq === this.loadSeq && !(this.userNavAt > loadedAt)) anchor(); };
         this.msg(n ? '' : 'No price history for this market / interval.');
         this.applyScale();
+        this.restorePrice();
         this.loadCompares().then(reanchor, reanchor);
         this.loadHtfStudies().then(reanchor, reanchor);
         this.removeQuoteLines(); this.updateQuote(); this.renderAlertLines();
@@ -543,7 +545,7 @@
         if (o.type === 'histogram') s = host.addHistogramSeries({ ...common, color: this.outColor(st, o), base: 0 });
         else s = host.addLineSeries({ ...common, color: this.outColor(st, o), lineWidth: this.outWidth(st, o), lineStyle: o.style || 0, lineType: o.lineType || 0, lineVisible: !o.dots, pointMarkersVisible: !!o.dots, pointMarkersRadius: 1.6 });
         if (def.range) s.applyOptions({ autoscaleInfoProvider: () => ({ priceRange: { minValue: def.range[0], maxValue: def.range[1] } }) });
-        else if (!pane && scaleId === 'right') s.applyOptions({ autoscaleInfoProvider: (orig) => (this.state.scalePriceOnly || this.state.lockRatio ? null : orig()) });
+        else if (!pane && scaleId === 'right') s.applyOptions({ autoscaleInfoProvider: (orig) => (this.state.scalePriceOnly || this.state.lockRatio || this.pinRange ? null : orig()) });
         rt.series[o.k] = s;
       }
       if (scaleId === 'vol') this.chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
@@ -1391,15 +1393,42 @@
     saveView() {
       clearTimeout(this.saveViewT);
       const key = this.viewKey(), n = this.disp.length;
-      if (!key || !n || !(this.userNavAt > (this.loadedAt || 0))) return;
-      const r = this.chart.timeScale().getVisibleLogicalRange();
-      if (!r) return;
-      const w = r.to - r.from, live = r.to >= n - 2;
-      const v = live ? { w, off: r.to - (n - 1) } : { w, t: this.logicalToTime(r.to) };
-      if (!live && v.t == null) return;
+      if (!key || !n) return;
+      const prev = VIEWS.get(key), nav = this.userNavAt > (this.loadedAt || 0);
+      const manual = !this.isAutoScale() && this.effectiveScale === 'normal' && !this.state.lockRatio;
+      if (!nav && !manual && !(prev && prev.p)) return;
+      let v = prev && !nav ? { ...prev } : null;
+      if (!v) {
+        const r = this.chart.timeScale().getVisibleLogicalRange();
+        if (!r) return;
+        const w = r.to - r.from, live = r.to >= n - 2;
+        v = live ? { w, off: r.to - (n - 1) } : { w, t: this.logicalToTime(r.to) };
+        if (!live && v.t == null) return;
+      }
+      delete v.p;
+      if (manual) {
+        const top = this.overlay.coordinateToPrice(0), bot = this.overlay.coordinateToPrice(this.mainHeight());
+        if (ok(top) && ok(bot) && top > bot) v.p = { top, bot };
+      }
       VIEWS.delete(key); VIEWS.set(key, v);
       while (VIEWS.size > 200) VIEWS.delete(VIEWS.keys().next().value);
       try { localStorage.setItem(VIEWS_KEY, JSON.stringify([...VIEWS])); } catch {}
+    }
+    // Manual price scale: feed the saved visible range (minus scale margins) to autoscale once, then freeze it.
+    restorePrice() {
+      const v = VIEWS.get(this.viewKey());
+      if (!v || !v.p || this.effectiveScale !== 'normal' || this.state.lockRatio) return;
+      const ps = this.chart.priceScale('right'), m = ps.options().scaleMargins || { top: 0.1, bottom: 0.08 };
+      const span = v.p.top - v.p.bot;
+      this.pinRange = { minValue: v.p.bot + span * m.bottom, maxValue: v.p.top - span * m.top };
+      ps.applyOptions({ autoScale: true });
+      const seq = this.loadSeq;
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        this.pinRange = null;
+        if (seq !== this.loadSeq) return;
+        ps.applyOptions({ autoScale: false });
+        this.shell.onAutoScale && this.shell.onAutoScale(this);
+      }));
     }
     queueSaveView() { clearTimeout(this.saveViewT); this.saveViewT = setTimeout(() => this.saveView(), 300); }
     restoreView() {
@@ -1615,7 +1644,7 @@
 
     // ── AI Chance v1.3 ──────────────────────────────────
     setupAC() {
-      const ind = (orig) => (this.state.scalePriceOnly || this.state.lockRatio ? null : orig());
+      const ind = (orig) => (this.state.scalePriceOnly || this.state.lockRatio || this.pinRange ? null : orig());
       const line = (color, lineWidth) => this.chart.addLineSeries({ color, lineWidth, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, autoscaleInfoProvider: ind });
       this.acPL = line('#FF9800', 2); this.acA5 = line('#9C27B0', 1); this.acC1 = line('#5C6BC0', 1); this.acC2 = line('#E040FB', 1);
       this.acTU = line('#787B86', 1); this.acTL = line('#787B86', 1);
