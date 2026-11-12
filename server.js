@@ -1322,11 +1322,17 @@ app.get('/api/history', wrap(async (req, res) => {
     // IG supplies the most recent HISTORY_IG_DAYS (or whatever is already cached); the older bars come from the extended source.
     const cached = historyCache.get(`${epic}|${resolution}`);
     const igWant = Math.min(max, MAX_HISTORY, Math.max(300, Math.ceil((HISTORY_IG_DAYS * 86400) / sec), cached ? cached.max : 0));
-    const igRes = await getHistory(epic, resolution, igWant, side);
+    let igRes, igError;
+    try { igRes = await getHistory(epic, resolution, igWant, side); } catch (e) {
+      if (e.body?.error !== 'historical-data-allowance') throw e;
+      igRes = { candles: [] }; igError = e;
+    }
     try {
       const { candles, source } = await histExt.extend({ epic, name: m.name, sec, ig: igRes.candles, want: max, side, cacheDir: path.join(__dirname, '.cache', 'ext') });
-      return res.json({ ...igRes, candles, sources: [...(source ? [source] : []), { provider: 'ig', bars: igRes.candles.length, from: igRes.candles[0] && igRes.candles[0].time }], allowance, resolution, side, maxBars: EXT_MAX });
+      if (!candles.length && igError) throw igError;
+      return res.json({ ...igRes, candles, sources: [...(source ? [source] : []), { provider: 'ig', bars: igRes.candles.length, from: igRes.candles[0] && igRes.candles[0].time }], allowance, resolution, side, maxBars: EXT_MAX, ...(igError ? { igAllowance: 'exhausted' } : {}) });
     } catch (e) {
+      if (igError) throw igError;
       console.warn('[history-ext]', epic, e.message);
       return res.json({ ...igRes, extError: e.message, allowance, resolution, side, maxBars: EXT_MAX });
     }
