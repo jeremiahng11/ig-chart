@@ -5,6 +5,8 @@
   const TY = () => window.IGTypes || {};
   const NA = NaN;
   const ok = Number.isFinite;
+  const VIEWS_KEY = 'igc.views';
+  const VIEWS = (() => { try { return new Map(JSON.parse(localStorage.getItem(VIEWS_KEY) || '[]')); } catch { return new Map(); } })();
 
   // ── intervals ─────────────────────────────────────────
   const UNIT_SEC = { S: 1, m: 60, H: 3600, D: 86400, W: 604800, M: 2592000 };
@@ -131,7 +133,7 @@
       window.addEventListener('pointerup', () => { if (this.navDown) { this.navDown = false; this.navAt = Date.now(); } });
       this.chart.timeScale().subscribeVisibleLogicalRangeChange((r) => {
         if (r && !this.syncing) this.syncPanes(this.chart, r);
-        if (!this.applyingRange && (this.navDown || Date.now() - (this.navAt || 0) < 400)) this.userNavAt = Date.now();
+        if (!this.applyingRange && (this.navDown || Date.now() - (this.navAt || 0) < 400)) { this.userNavAt = Date.now(); this.queueSaveView(); }
         if (!this.applyingRange) this.shell.onRange(this);
       });
       this.chart.subscribeCrosshairMove((p) => this.onCrosshair(this.chart, p));
@@ -298,6 +300,7 @@
     async load(opts = {}) {
       const seq = ++this.loadSeq;
       if (this.rp.on || this.rp.picking) this.replayStop(true);
+      this.saveView();
       this.candlesFor = null;
       const sym = this.state.symbol;
       this.updateSubscriptions();
@@ -334,14 +337,16 @@
         this.footprint = new Map();
         this.renderAll();
         const n = this.disp.length, loadedAt = Date.now();
+        this.loadedAt = loadedAt;
         let span = 150;
         if (opts.span && n) {
           const from = this.candles[this.candles.length - 1].time - opts.span;
           let i = n - 1; while (i > 0 && this.disp[i - 1].time >= from) i--;
           span = n - i;
         }
-        this.toLatest(span);
-        const reanchor = () => { if (seq === this.loadSeq && !(this.userNavAt > loadedAt)) this.toLatest(span); };
+        const anchor = () => { if (opts.span || !this.restoreView()) this.toLatest(span); };
+        anchor();
+        const reanchor = () => { if (seq === this.loadSeq && !(this.userNavAt > loadedAt)) anchor(); };
         this.msg(n ? '' : 'No price history for this market / interval.');
         this.applyScale();
         this.loadCompares().then(reanchor, reanchor);
@@ -1379,6 +1384,33 @@
       if (w > 0) ts.applyOptions({ barSpacing: Math.max(0.5, w / (k + RIGHT)) });
       ts.scrollToPosition(RIGHT, false);
       this.applyingRange = false;
+    }
+    // Per symbol/interval pan & zoom memory: visible bar count plus either the right-edge time (panned into history)
+    // or the offset from the newest bar (following live), so returning to a chart restores where it was left.
+    viewKey() { return this.candlesFor && `${this.candlesFor}|${this.typeInfo().priceBased ? this.state.type : ''}`; }
+    saveView() {
+      clearTimeout(this.saveViewT);
+      const key = this.viewKey(), n = this.disp.length;
+      if (!key || !n || !(this.userNavAt > (this.loadedAt || 0))) return;
+      const r = this.chart.timeScale().getVisibleLogicalRange();
+      if (!r) return;
+      const w = r.to - r.from, live = r.to >= n - 2;
+      const v = live ? { w, off: r.to - (n - 1) } : { w, t: this.logicalToTime(r.to) };
+      if (!live && v.t == null) return;
+      VIEWS.delete(key); VIEWS.set(key, v);
+      while (VIEWS.size > 200) VIEWS.delete(VIEWS.keys().next().value);
+      try { localStorage.setItem(VIEWS_KEY, JSON.stringify([...VIEWS])); } catch {}
+    }
+    queueSaveView() { clearTimeout(this.saveViewT); this.saveViewT = setTimeout(() => this.saveView(), 300); }
+    restoreView() {
+      const v = VIEWS.get(this.viewKey()), n = this.disp.length;
+      if (!v || !n || !(v.w > 1)) return false;
+      const to = v.t != null ? this.timeToLogical(v.t) : n - 1 + v.off;
+      if (to == null || !Number.isFinite(to)) return false;
+      this.applyingRange = true;
+      this.chart.timeScale().setVisibleLogicalRange({ from: to - v.w, to });
+      this.applyingRange = false;
+      return true;
     }
     goTo(t) {
       const l = this.timeToLogical(t);
