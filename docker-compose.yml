@@ -1,0 +1,17 @@
+services:
+  ig-charts:
+    build: .
+    env_file:
+      - .env
+    environment:
+      - PORT=3000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ig-data:/app/.data
+      - ig-cache:/app/.cache
+    restart: unless-stopped
+
+volumes:
+  ig-data:
+  ig-cache:

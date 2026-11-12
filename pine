@@ -1,0 +1,1218 @@
+//@version=5
+indicator("AI Chance v1.3", overlay=true, max_bars_back=2000)
+
+// ── SYMBOL MODE ──────────────────────────────────────────
+_sym_auto   = str.contains(syminfo.ticker, "BTC") or str.contains(syminfo.ticker, "ETH") or str.contains(syminfo.ticker, "XRP") ? "Crypto" : "Metals"
+symbol_mode = input.string("Auto", title="Symbol Mode", options=["Auto", "Metals (XAUUSD)", "Crypto (BTCUSD)"],
+ tooltip="Auto detects BTC/ETH/XRP as Crypto, everything else as Metals.",
+ group="⚙️ Symbol & Auto Settings")
+_is_crypto  = symbol_mode == "Auto" ? _sym_auto == "Crypto" : symbol_mode == "Crypto (BTCUSD)"
+
+// ── TIMEFRAME SCALING ────────────────────────────────────
+_tf_mins         = math.max(1, timeframe.in_seconds() / 60)
+_bars_per_25min  = math.max(1, math.round(25  / _tf_mins))
+_bars_per_50min  = math.max(1, math.round(50  / _tf_mins))
+_bars_per_1hr    = math.max(1, math.round(60  / _tf_mins))
+_bars_per_100min = math.max(1, math.round(100 / _tf_mins))
+
+// ── PER-PARAMETER AUTO/MANUAL DROPDOWNS ──────────────────
+// Each defaults to "Auto". Set to a specific value to override.
+_in_cooldown = input.string("Auto", title="Enter Cooldown",
+ options=["Auto","3","5","8","10","15","20"],
+ tooltip="Auto = 25min scaled to chart TF. Manual = fixed bar count.",
+ group="⚙️ Symbol & Auto Settings")
+
+_in_expire   = input.string("Auto", title="Confirm Expire",
+ options=["Auto","5","10","15","20","30"],
+ tooltip="Auto = 50min scaled to chart TF.",
+ group="⚙️ Symbol & Auto Settings")
+
+_in_sw_bars  = input.string("Auto", title="Sideways Lookback",
+ options=["Auto","6","8","12","16","20","24"],
+ tooltip="Auto = 1 hour scaled to chart TF.",
+ group="⚙️ Symbol & Auto Settings")
+
+_in_tl_timeout = input.string("Auto", title="TL Timeout",
+ options=["Auto","10","15","20","25","30","40"],
+ tooltip="Auto = 100min scaled to chart TF.",
+ group="⚙️ Symbol & Auto Settings")
+
+_in_tp_atr   = input.string("Auto", title="Short Trade TP ATR",
+ options=["Auto","0.5","0.75","1.0","1.25","1.5","2.0"],
+ tooltip="Auto = 1.0x Metals / 1.5x Crypto.",
+ group="⚙️ Symbol & Auto Settings")
+
+_in_sl_atr   = input.string("Auto", title="Short Trade SL ATR",
+ options=["Auto","0.25","0.5","0.75","1.0","1.25"],
+ tooltip="Auto = 0.75x Metals / 0.5x Crypto.",
+ group="⚙️ Symbol & Auto Settings")
+
+_in_htf1     = input.string("Auto", title="HTF 1",
+ options=["Auto","5","15","60","240"],
+ tooltip="Auto = 15m for all symbols.",
+ group="⚙️ Symbol & Auto Settings")
+
+_in_htf2     = input.string("Auto", title="HTF 2",
+ options=["Auto","15","60","240","D"],
+ tooltip="Auto = 1h Metals / 4h Crypto.",
+ group="⚙️ Symbol & Auto Settings")
+
+// ── RESOLVED VALUES ───────────────────────────────────────
+enter_cooldown = _in_cooldown == "Auto" ? _bars_per_25min  : int(str.tonumber(_in_cooldown))
+confirm_expire = _in_expire   == "Auto" ? _bars_per_50min  : int(str.tonumber(_in_expire))
+_sw_bars_r     = _in_sw_bars  == "Auto" ? _bars_per_1hr    : int(str.tonumber(_in_sw_bars))
+_tl_timeout    = _in_tl_timeout == "Auto" ? _bars_per_100min : int(str.tonumber(_in_tl_timeout))
+_tp_atr        = _in_tp_atr   == "Auto" ? (_is_crypto ? 1.5  : 1.0)  : float(str.tonumber(_in_tp_atr))
+_sl_atr        = _in_sl_atr   == "Auto" ? (_is_crypto ? 0.5  : 0.75) : float(str.tonumber(_in_sl_atr))
+_htf1          = _in_htf1     == "Auto" ? "15"                        : _in_htf1
+_htf2          = _in_htf2     == "Auto" ? (_is_crypto ? "240" : "60") : _in_htf2
+
+// ── INPUTS ───────────────────────────────────────────────
+momentum_thresh      = input.float(0.5,  title="Momentum Threshold", step=0.1, group="General")
+show_sideways        = input.bool(true,  title="Show Sideways Label",          group="Display")
+show_pl              = input.bool(true,  title="Show PL EMA(25)",              group="Display")
+show_a5              = input.bool(true,  title="Show A5 TMA(open,50)",         group="Display")
+show_c1              = input.bool(false, title="Show C1 Session SMA",          group="Display")
+show_c2              = input.bool(false, title="Show C2 Session SMA hlc3",     group="Display")
+
+// ── TRADE MODE ───────────────────────────────────────────
+trade_mode           = input.string("Trend", title="Trade Mode", options=["Trend", "Short Trade", "Both"], group="Trade Mode")
+short_tp_atr         = _tp_atr
+short_sl_atr         = _sl_atr
+short_rsi_threshold  = input.int(35, title="Short Trade RSI Threshold", minval=20, maxval=50, group="Trade Mode")
+_rsi_thresh          = _is_crypto ? math.max(short_rsi_threshold, 40) : short_rsi_threshold
+
+// ── CORE LINES ───────────────────────────────────────────
+pl = ta.ema(close, 25)
+
+tma(src, len) =>
+    h = len / 2 + 1
+    ta.sma(ta.sma(src, math.round(h)), math.round(h))
+
+a5 = tma(open, 50)
+
+// ── A5 ROC & TOUCH ───────────────────────────────────────
+a5_roc       = a5 - a5[1]
+a5_roc_prev  = a5[1] - a5[2]
+a5_bend_up   = a5_roc_prev < 0 and a5_roc >= 0   // was falling, now flat/rising  = trough
+a5_bend_down = a5_roc_prev > 0 and a5_roc <= 0   // was rising,  now flat/falling = top
+a5_touches   = a5 >= low and a5 <= high
+
+// ── A5 TREND ─────────────────────────────────────────────
+var int a5_trend = 0
+a5_rising  = a5 > a5[1] and a5[1] > a5[2]
+a5_falling = a5 < a5[1] and a5[1] < a5[2]
+a5_trend  := a5_rising ? 1 : a5_falling ? -1 : a5_trend
+
+// ── A5 CROSSOVER (direction flip) ────────────────────────
+a5_cross_up   = a5 >= low and a5 <= high and a5[1] < low[1]
+a5_cross_down = a5 >= low and a5 <= high and a5[1] > high[1]
+
+// ── EMA DIRECTION & BIAS ─────────────────────────────────
+var int ema_trend = 0
+ema_rising      = pl > pl[1] and pl[1] > pl[2]
+ema_falling     = pl < pl[1] and pl[1] < pl[2]
+ema_trend      := ema_rising ? 1 : ema_falling ? -1 : ema_trend
+price_above_ema = close > pl
+price_below_ema = close < pl
+
+// ── A5 vs EMA DIVERGENCE BIAS ────────────────────────────
+a5_ema_gap      = math.abs(a5 - pl)
+a5_ema_widening = a5_ema_gap > math.abs(a5[1] - pl[1]) and math.abs(a5[1] - pl[1]) > math.abs(a5[2] - pl[2])
+_struct_bear = a5 > pl and (ema_falling or ema_trend == -1) and price_below_ema
+_struct_bull = a5 < pl and (ema_rising  or ema_trend ==  1) and price_above_ema
+bias_bear    = (a5 > pl and a5_ema_widening) or _struct_bear
+bias_bull    = (a5 < pl and a5_ema_widening) or _struct_bull
+
+// ── SESSION SMA C1 / C2 ──────────────────────────────────
+var float _cs = 0.0
+var float _cc = 0.0
+var int   _cd = na
+_curr_date = dayofmonth + month * 100
+if na(_cd) or _curr_date != _cd
+    _cs := close
+    _cc := 1.0
+    _cd := _curr_date
+else
+    _cs += close
+    _cc += 1.0
+c1 = _cs / _cc
+
+var float _hs = 0.0
+var float _hc = 0.0
+var int   _hd = na
+_curr_date2 = dayofmonth + month * 100
+if na(_hd) or _curr_date2 != _hd
+    _hs := hlc3
+    _hc := 1.0
+    _hd := _curr_date2
+else
+    _hs += hlc3
+    _hc += 1.0
+c2 = _hs / _hc
+
+// ── RSI ──────────────────────────────────────────────────
+rsi14 = ta.rsi(close, 14)
+
+// ── BOLLINGER BANDS ──────────────────────────────────────
+bb_basis   = ta.sma(close, 20)
+bb_dev     = ta.stdev(close, 20)
+bb_upper   = bb_basis + 2 * bb_dev
+bb_lower   = bb_basis - 2 * bb_dev
+bb_expansion = bb_dev > bb_dev[5] * 1.15
+price_at_bb_upper = high >= bb_upper * 0.999
+price_at_bb_lower = low  <= bb_lower * 1.001
+
+// ── VWAP ─────────────────────────────────────────────────
+var float _vs = 0.0
+var float _vv = 0.0
+var int   _vd = na
+_vdate = dayofmonth + month * 100
+if na(_vd) or _vdate != _vd
+    _vs := hlc3 * volume
+    _vv := volume
+    _vd := _vdate
+else
+    _vs += hlc3 * volume
+    _vv += volume
+vwap_val         = _vv > 0 ? _vs / _vv : na
+price_above_vwap = close > vwap_val
+vwap_extended    = math.abs(close - vwap_val) > ta.atr(14) * 2.0
+
+// ── CANDLESTICK PATTERNS ─────────────────────────────────
+_body      = math.abs(close - open)
+_range     = high - low
+_bull_body = close > open
+_bear_body = close < open
+bull_engulf   = _bull_body and close > high[1] and open < low[1]
+bear_engulf   = _bear_body and close < low[1]  and open > high[1]
+_upper_wick   = high - math.max(close, open)
+_lower_wick   = math.min(close, open) - low
+_is_pin_bull  = _lower_wick > _body * 2 and _lower_wick > _upper_wick * 2
+_is_pin_bear  = _upper_wick > _body * 2 and _upper_wick > _lower_wick * 2
+
+// ── TMA BANDS ────────────────────────────────────────────
+atr            = ta.atr(14)
+atr200         = ta.atr(200)
+tma_upper      = a5 + atr * 1.5
+tma_lower      = a5 - atr * 1.5
+tma_range      = tma_upper - tma_lower
+
+// ── TAD BUY / SELL THRESHOLDS ────────────────────────────
+// Reverse-engineered from TAD data: exact midpoints of each half-band
+// Buy Thresh  = midpoint(tma_lower, a5) — TAD trigger zone for longs
+// Sell Thresh = midpoint(a5, tma_upper) — TAD trigger zone for shorts
+tad_buy_thresh  = (tma_lower + a5) / 2
+tad_sell_thresh = (a5 + tma_upper) / 2
+
+// ── TAD TARGET LINE (TL) LOGIC ───────────────────────────
+// TL = tma_lower for TMN+ (bull), tma_upper for TMN- (bear) — matches TAD
+// Ready score = (tl_fixed - close) / atr(200) — matches TAD normalization
+// Crossover: price crosses TAD threshold (not raw TMA band edge)
+tl_cross_bull   = close[1] <= tad_buy_thresh[1]  and close > tad_buy_thresh
+tl_cross_bear   = close[1] >= tad_sell_thresh[1] and close < tad_sell_thresh
+// Proximity: price touches TAD threshold zone
+price_at_tma_upper = high >= tad_sell_thresh * 0.999 and close < tad_sell_thresh
+price_at_tma_lower = low  <= tad_buy_thresh  * 1.001 and close > tad_buy_thresh
+tma_rejection_bear = price_at_tma_upper and _bear_body
+tma_rejection_bull = price_at_tma_lower and _bull_body
+
+// ── STMN — extreme extension beyond TAD threshold ────────
+stmn_bear = close >= tad_sell_thresh
+stmn_bull = close <= tad_buy_thresh
+
+// ── HIGHER TIMEFRAME BIAS (15m + 1H) ─────────────────────
+htf_15_ema   = request.security(syminfo.tickerid, _htf1, ta.ema(close, 25), lookahead=barmerge.lookahead_off)
+htf_15_ema1  = request.security(syminfo.tickerid, _htf1, ta.ema(close, 25)[1], lookahead=barmerge.lookahead_off)
+htf_1h_ema   = request.security(syminfo.tickerid, _htf2, ta.ema(close, 25), lookahead=barmerge.lookahead_off)
+htf_1h_ema1  = request.security(syminfo.tickerid, _htf2, ta.ema(close, 25)[1], lookahead=barmerge.lookahead_off)
+htf_1h_close = request.security(syminfo.tickerid, _htf2, close, lookahead=barmerge.lookahead_off)
+htf_15_bull  = htf_15_ema > htf_15_ema1 and close > htf_15_ema
+htf_15_bear  = htf_15_ema < htf_15_ema1 and close < htf_15_ema
+htf_1h_bull  = htf_1h_ema > htf_1h_ema1 and htf_1h_close > htf_1h_ema
+htf_1h_bear  = htf_1h_ema < htf_1h_ema1 and htf_1h_close < htf_1h_ema
+htf_bull_score  = (htf_15_bull ? 1 : 0) + (htf_1h_bull ? 1 : 0)
+htf_bear_score  = (htf_15_bear ? 1 : 0) + (htf_1h_bear ? 1 : 0)
+htf_bull        = htf_bull_score >= 1
+htf_bear        = htf_bear_score >= 1
+htf_strong_bull = htf_bull_score == 2
+htf_strong_bear = htf_bear_score == 2
+
+// ── VOLUME ───────────────────────────────────────────────
+vol_sma    = ta.sma(volume, 20)
+vol_bull   = volume > vol_sma * 1.3 and close > open
+vol_bear   = volume > vol_sma * 1.3 and close < open
+vol_climax = volume > vol_sma * 2.5
+
+// ── TMN SCORING ──────────────────────────────────────────
+_tmn_bear_count = (stmn_bear ? 1 : 0) + (price_at_tma_upper ? 1 : 0) + (_bear_body ? 1 : 0) + (rsi14 > 55 ? 1 : 0) + (price_below_ema ? 1 : 0) + (c1 > c2 ? 1 : 0) + (price_at_bb_upper ? 1 : 0) + (htf_bear ? 1 : 0) + (vol_bear ? 1 : 0)
+_tmn_bull_count = (stmn_bull ? 1 : 0) + (price_at_tma_lower ? 1 : 0) + (_bull_body ? 1 : 0) + (rsi14 < 45 ? 1 : 0) + (price_above_ema ? 1 : 0) + (c1 < c2 ? 1 : 0) + (price_at_bb_lower ? 1 : 0) + (htf_bull ? 1 : 0) + (vol_bull ? 1 : 0)
+_tmn_bear_prev  = (stmn_bear[1] ? 1 : 0) + (price_at_tma_upper[1] ? 1 : 0) + (close[1] < open[1] ? 1 : 0) + (rsi14[1] > 55 ? 1 : 0) + (price_below_ema[1] ? 1 : 0) + (c1[1] > c2[1] ? 1 : 0) + (price_at_bb_upper[1] ? 1 : 0)
+_tmn_bull_prev  = (stmn_bull[1] ? 1 : 0) + (price_at_tma_lower[1] ? 1 : 0) + (close[1] > open[1] ? 1 : 0) + (rsi14[1] < 45 ? 1 : 0) + (price_above_ema[1] ? 1 : 0) + (c1[1] < c2[1] ? 1 : 0) + (price_at_bb_lower[1] ? 1 : 0)
+
+// ── BIAS NET (early calc — needed by TMN guards below) ────
+// Full calc repeated at line ~648 for label display — keep in sync
+_bias_bear_pts_e = (_struct_bear ? 2 : 0) + (bias_bear ? 1 : 0) + (ema_trend == -1 ? 1 : 0) + (price_below_ema ? 1 : 0) + (htf_bear ? 1 : 0) + (htf_strong_bear ? 1 : 0) + (a5_trend == -1 ? 1 : 0) + (c1 > c2 ? 1 : 0)
+_bias_bull_pts_e = (_struct_bull ? 2 : 0) + (bias_bull ? 1 : 0) + (ema_trend == 1 ? 1 : 0) + (price_above_ema ? 1 : 0) + (htf_bull ? 1 : 0) + (htf_strong_bull ? 1 : 0) + (a5_trend == 1 ? 1 : 0) + (c1 < c2 ? 1 : 0)
+_bias_net_e      = _bias_bull_pts_e - _bias_bear_pts_e
+
+// ── TMN GUARDS — full trend filter ──────────────────────
+// TMN+: price AT TMA lower + green candle + not bearish HTF/bias/structure
+// TMN-: price AT TMA upper + red candle + not bullish HTF/bias/structure
+_tmn_bull_guard = stmn_bull and close > open and not htf_bear and not bias_bear and _bias_net_e >= -1
+_tmn_bear_guard = stmn_bear and close < open and not htf_bull and not bias_bull and _bias_net_e <= -1
+tmn_bear_signal = ((_tmn_bear_count >= 4 and _tmn_bear_prev >= 3) or tl_cross_bear) and _tmn_bear_guard
+tmn_bull_signal = ((_tmn_bull_count >= 4 and _tmn_bull_prev >= 3) or tl_cross_bull) and _tmn_bull_guard
+
+// ── STATE VARS ───────────────────────────────────────────
+var int   last_enter_bar  = na
+var int   last_chance_bar = na
+var label ready_lbl       = na
+var line  ready_ln        = na
+var line  ready_horiz     = na
+var float last_peak_level = na
+var int   last_peak_dir   = 0
+var int   last_peak_bar   = na
+var bool  breakout_alerted = false
+var label breakout_lbl    = na
+var line  breakout_ln     = na
+var int   breakout_bar    = na
+var int   breakout_dir    = 0
+var label confirm_lbl     = na
+var line  confirm_ln      = na
+var int   confirm_bar     = na
+var int   confirm_dir     = 0
+var bool  ready_fired     = false
+var label tmn_lbl         = na
+var line  tmn_ln          = na
+var label a5cross_lbl     = na
+var line  a5cross_ln      = na
+var int   a5cross_bar     = na
+var label prox_lbl        = na
+var line  prox_ln         = na
+var int   last_prox_bar   = na
+var int   prox_fire_bar   = na
+var label chance_lbl      = na
+var line  chance_ln       = na
+var line  peak_ln         = na
+var int   last_tmn        = na
+var bool  counter_tmn_active = false
+var int   counter_tmn_bar    = na
+var int   tmn_outcome_bar = na
+var int   tmn_outcome_dir = 0
+var float tmn_outcome_ref = na
+var float tl_fixed        = na   // TMA Lower (bull) or TMA Upper (bear) at TMN fire
+var float tl_fixed_score  = na
+var float tl_fixed_atr    = na   // ATR locked at fire bar for deviation check
+var int   tl_fixed_bar    = na
+var int   tl_fixed_dir    = 0
+var float tl_inval_level  = na
+var line  tl_line         = na
+var label tl_lbl_ready    = na
+var label tl_lbl_price    = na
+
+// ── CHANCE LABEL (A5 touch) ──────────────────────────────
+a5_cool = na(last_enter_bar) or bar_index - last_enter_bar >= enter_cooldown
+_bear_context_a5 = a5 > pl and (ema_falling or ema_trend == -1) and price_below_ema
+_bull_context_a5 = a5 < pl and (ema_rising  or ema_trend ==  1) and price_above_ema
+_a5_touch_trend_ok = bias_bear or bias_bull or (not _bear_context_a5 and not _bull_context_a5)
+a5_touch_ok = a5_touches and a5_cool and _a5_touch_trend_ok and (na(prox_lbl) or bar_index - last_prox_bar >= enter_cooldown * 3)
+if a5_touch_ok
+    label.delete(confirm_lbl)
+    line.delete(confirm_ln)
+    confirm_lbl := na
+    confirm_ln  := na
+    confirm_bar := na
+    confirm_dir := 0
+    label.delete(ready_lbl)
+    line.delete(ready_ln)
+    ready_lbl := na
+    ready_ln  := na
+    if not breakout_alerted
+        ready_fired := false
+    last_enter_bar  := bar_index
+    last_chance_bar := bar_index
+    _chance_text  = bias_bear ? "Chance SELL?" : bias_bull ? "Chance BUY?" : "Chance"
+    _chance_color = bias_bear ? color.new(color.red, 40) : bias_bull ? color.new(color.green, 40) : color.new(color.purple, 10)
+    _cl_above     = bias_bear
+    _cl_y         = _cl_above ? high + atr * 0.8 : low - atr * 0.8
+    _cl_style     = _cl_above ? label.style_label_down : label.style_label_up
+    _cl_anchor    = _cl_above ? high : low
+    label.delete(chance_lbl)
+    chance_lbl := label.new(x=bar_index, y=_cl_y, text=_chance_text,
+     style=_cl_style, color=_chance_color,
+     textcolor=color.white, size=size.small)
+    chance_ln  := line.new(x1=bar_index, y1=_cl_y, x2=bar_index, y2=_cl_anchor,
+     color=_chance_color, width=1, style=line.style_dashed)
+
+// ── PEAK LABEL ───────────────────────────────────────────
+// a5_bend_up  = trough — label below bar, dir=-1 (expect bounce up)
+// a5_bend_down = top   — label above bar, dir=+1 (expect pullback)
+// Latest peak = blue, all previous peaks = red
+var label last_peak_lbl = na
+
+if a5_bend_up and not a5_touches[2]
+    last_peak_level := a5[1]
+    last_peak_dir   := -1
+    last_peak_bar   := bar_index - 1
+    if not na(last_peak_lbl)
+        label.set_color(last_peak_lbl, color.new(color.red, 20))
+    _pk1_y = math.min(low[1], a5[1]) - atr * 2.5
+    last_peak_lbl := label.new(x=bar_index-1, y=_pk1_y, text="Peak",
+     style=label.style_label_up, color=color.new(color.blue, 20),
+     textcolor=color.white, size=size.small)
+    peak_ln := line.new(x1=bar_index-1, y1=a5[1], x2=bar_index-1, y2=low[1],
+     color=color.new(color.blue, 40), width=1, style=line.style_dashed)
+    if not breakout_alerted
+        label.delete(ready_lbl)
+        line.delete(ready_ln)
+        ready_lbl   := na
+        ready_ln    := na
+        ready_fired := false
+if a5_bend_down and not a5_touches[2]
+    last_peak_level := a5[1]
+    last_peak_dir   := 1
+    last_peak_bar   := bar_index - 1
+    if not na(last_peak_lbl)
+        label.set_color(last_peak_lbl, color.new(color.red, 20))
+    _pk2_y = math.max(high[1], a5[1]) + atr * 2.5
+    last_peak_lbl := label.new(x=bar_index-1, y=_pk2_y, text="Peak",
+     style=label.style_label_down, color=color.new(color.blue, 20),
+     textcolor=color.white, size=size.small)
+    peak_ln := line.new(x1=bar_index-1, y1=a5[1], x2=bar_index-1, y2=high[1],
+     color=color.new(color.blue, 40), width=1, style=line.style_dashed)
+    if not breakout_alerted
+        label.delete(ready_lbl)
+        line.delete(ready_ln)
+        ready_lbl   := na
+        ready_ln    := na
+        ready_fired := false
+
+// ── PROXIMITY CHANCE ─────────────────────────────────────
+_prox_atr    = ta.atr(14)
+_prox_dist   = math.abs(close - a5)
+_prox_active = not breakout_alerted and na(confirm_lbl) and not a5_touches
+_prox_near   = _prox_dist <= _prox_atr * 1.5
+_prox_cool   = na(last_prox_bar) or bar_index - last_prox_bar >= enter_cooldown * 3
+_prox_above  = close > a5 and close[1] > a5
+_p_dir_pre   = _prox_above ? -1 : 1
+_bear_context = a5 > pl and (ema_falling or ema_trend == -1) and price_below_ema
+_bull_context = a5 < pl and (ema_rising  or ema_trend ==  1) and price_above_ema
+_p_bias_ok   = not ((bias_bear or _struct_bear or _bear_context) and _p_dir_pre == 1) and not ((bias_bull or _struct_bull or _bull_context) and _p_dir_pre == -1)
+
+// Invalidate existing prox label if trend flips against it
+if not na(prox_lbl)
+    _existing_txt = label.get_text(prox_lbl)
+    _flip_bear = (str.contains(_existing_txt, "BUY") or str.contains(_existing_txt, "↑")) and (bias_bear or _struct_bear or _bear_context)
+    _flip_bull = (str.contains(_existing_txt, "SELL") or str.contains(_existing_txt, "↓")) and (bias_bull or _struct_bull or _bull_context)
+    if _flip_bear or _flip_bull
+        label.delete(prox_lbl)
+        line.delete(prox_ln)
+        prox_lbl      := na
+        prox_ln       := na
+        prox_fire_bar := na
+
+if _prox_active and _prox_near and _prox_cool and na(prox_lbl) and _p_bias_ok
+    _pbody    = math.abs(close - open)
+    _p_dir    = _prox_above ? -1 : 1
+    _p_a5ok   = (_p_dir == 1 and a5_trend == -1) or (_p_dir == -1 and a5_trend == 1)
+    _p_htf    = (_p_dir == 1 and htf_bull) or (_p_dir == -1 and htf_bear)
+    _p_htfs   = (_p_dir == 1 and htf_strong_bull) or (_p_dir == -1 and htf_strong_bear)
+    _p_vol    = (_p_dir == 1 and vol_bull) or (_p_dir == -1 and vol_bear)
+    _p_emaok  = (_p_dir == 1 and ema_trend == 1) or (_p_dir == -1 and ema_trend == -1)
+    _p_sess   = (_p_dir == 1 and c1 < c2) or (_p_dir == -1 and c1 > c2)
+    _p_rsi    = (_p_dir == 1 and rsi14 < 50) or (_p_dir == -1 and rsi14 > 50)
+    _p_vwap   = (_p_dir == 1 and price_above_vwap) or (_p_dir == -1 and not price_above_vwap)
+    _p_candle = (_p_dir == 1 and (bull_engulf or _is_pin_bull)) or (_p_dir == -1 and (bear_engulf or _is_pin_bear))
+    _p_tma    = (_p_dir == 1 and tma_rejection_bull) or (_p_dir == -1 and tma_rejection_bear)
+    _p_score  = (_p_a5ok ? 1 : 0) + (_p_emaok ? 1 : 0) + (_p_sess ? 1 : 0)
+              + (_p_rsi ? 1 : 0) + (_p_vwap ? 1 : 0) + (_p_candle ? 1 : 0) + (_p_tma ? 1 : 0)
+              + (_p_htf ? 1 : 0) + (_p_htfs ? 1 : 0) + (_p_vol ? 1 : 0)
+    _p_dots   = _p_score >= 8 ? "●●●●●" : _p_score >= 6 ? "●●●●" : _p_score >= 4 ? "●●●" : _p_score >= 2 ? "●●" : _p_score >= 1 ? "●" : "○"
+    _arrow    = _p_dir == 1 ? "↑" : "↓"
+    _p_action = _p_dir == 1 ? "BUY" : "SELL"
+    _dir_text = _p_score >= 4 ? ("Chance " + _p_action + " " + _p_dots) : _p_score >= 2 ? ("Chance " + _p_action + " " + _p_dots) : ("Watch " + _arrow + " " + _p_dots)
+    _p_color  = _p_score >= 7 ? color.new(color.purple, 0) : _p_score >= 5 ? color.new(color.purple, 10) : _p_score >= 3 ? color.new(color.purple, 25) : _p_score >= 1 ? color.new(color.purple, 45) : color.new(color.purple, 60)
+    _prox_above_lbl = _p_dir == -1
+    _prox_y     = _prox_above_lbl ? high + _prox_atr * 0.8 : low - _prox_atr * 0.8
+    _prox_sty   = _prox_above_lbl ? label.style_label_down : label.style_label_up
+    _prox_anch  = _prox_above_lbl ? high : low
+    prox_lbl := label.new(x=bar_index, y=_prox_y, text=_dir_text,
+     style=_prox_sty, color=_p_color, textcolor=color.white, size=size.small)
+    prox_ln  := line.new(x1=bar_index, y1=_prox_y, x2=bar_index, y2=_prox_anch,
+     color=_p_color, width=1, style=line.style_dashed)
+    last_prox_bar := bar_index
+    prox_fire_bar := bar_index
+else if not (_prox_active and _prox_near)
+    label.delete(prox_lbl)
+    line.delete(prox_ln)
+    prox_lbl      := na
+    prox_ln       := na
+    prox_fire_bar := na
+
+// ── BREAKOUT WARNING ─────────────────────────────────────
+if not na(last_peak_level) and not breakout_alerted and bar_index > last_peak_bar + 1 and bar_index <= last_peak_bar + 20
+    if last_peak_dir == -1 and close > last_peak_level and close > open
+        label.delete(breakout_lbl)
+        _bou_y = high + atr * 0.8
+        breakout_lbl := label.new(x=bar_index, y=_bou_y,
+         text="⚠ Breakout Up", style=label.style_label_down,
+         color=color.new(color.orange, 10), textcolor=color.white, size=size.small)
+        breakout_ln  := line.new(x1=bar_index, y1=_bou_y, x2=bar_index, y2=high,
+         color=color.new(color.orange, 30), width=1, style=line.style_dashed)
+        breakout_alerted := true
+        breakout_bar     := bar_index
+        breakout_dir     := 1
+    if last_peak_dir == 1 and close < last_peak_level and close < open
+        label.delete(breakout_lbl)
+        _bod_y = low - atr * 0.8
+        breakout_lbl := label.new(x=bar_index, y=_bod_y,
+         text="⚠ Breakout Down", style=label.style_label_up,
+         color=color.new(color.orange, 10), textcolor=color.white, size=size.small)
+        breakout_ln  := line.new(x1=bar_index, y1=_bod_y, x2=bar_index, y2=low,
+         color=color.new(color.orange, 30), width=1, style=line.style_dashed)
+        breakout_alerted := true
+        breakout_bar     := bar_index
+        breakout_dir     := -1
+
+if not na(breakout_bar) and bar_index > breakout_bar
+    breakout_lbl := na
+
+// ── A5 CROSSOVER SIGNAL ──────────────────────────────────
+if a5_cross_up or a5_cross_down
+    if not na(confirm_lbl)
+        label.delete(confirm_lbl)
+        line.delete(confirm_ln)
+        confirm_lbl := na
+        confirm_ln  := na
+        confirm_bar := na
+        confirm_dir := 0
+    ready_fired      := false
+    breakout_alerted := false
+    _cx_text = a5_cross_up ? "A5 SELL Bias" : "A5 BUY Bias"
+    _cx_col  = a5_cross_up ? color.new(color.red, 20) : color.new(color.green, 20)
+    _cx_y    = a5_cross_up ? high + atr * 1.0 : low - atr * 1.0
+    _cx_sty  = a5_cross_up ? label.style_label_down : label.style_label_up
+    label.delete(a5cross_lbl)
+    a5cross_lbl := label.new(x=bar_index, y=_cx_y, text=_cx_text,
+     style=_cx_sty, color=_cx_col, textcolor=color.white, size=size.small)
+    _cx_anchor  = a5_cross_up ? high : low
+    a5cross_ln  := line.new(x1=bar_index, y1=_cx_y, x2=bar_index, y2=_cx_anchor,
+     color=_cx_col, width=1, style=line.style_dashed)
+    a5cross_bar := bar_index
+
+// ── READY / CONFIRMED ────────────────────────────────────
+if breakout_alerted and not na(breakout_bar) and bar_index > breakout_bar
+    _atr14    = ta.atr(14)
+    _cur_up   = breakout_dir == 1  and close > open and not bias_bear and not _struct_bear
+    _cur_down = breakout_dir == -1 and close < open and not bias_bull and not _struct_bull
+    _cur_match  = _cur_up or _cur_down
+    _actual_dir = _cur_up ? 1 : -1
+
+    if _cur_match and ready_fired
+        _bc = math.abs(close - open)
+        _bp = math.abs(close[1] - open[1])
+        _ba = (_bc + _bp) / 2
+        _ema_ok  = (_actual_dir == 1 and (ema_trend == 1 or price_above_ema)) or (_actual_dir == -1 and (ema_trend == -1 or price_below_ema))
+        _a5_ok   = (_actual_dir == 1 and a5_trend == -1) or (_actual_dir == -1 and a5_trend == 1)
+        _sess_ok = (_actual_dir == 1 and c1 < c2 and close > c1) or (_actual_dir == -1 and c1 > c2 and close < c1)
+        _rsi_ok  = (_actual_dir == 1 and rsi14 < 55) or (_actual_dir == -1 and rsi14 > 45)
+        _bb_ok   = (_actual_dir == 1 and (close <= bb_lower or bb_expansion)) or (_actual_dir == -1 and (close >= bb_upper or bb_expansion))
+        _vwap_ok = (_actual_dir == 1 and price_above_vwap and not vwap_extended) or (_actual_dir == -1 and not price_above_vwap and not vwap_extended)
+        _cand_ok = (_actual_dir == 1 and (bull_engulf or _is_pin_bull)) or (_actual_dir == -1 and (bear_engulf or _is_pin_bear))
+        _tma_ok  = (_actual_dir == 1 and tma_rejection_bull) or (_actual_dir == -1 and tma_rejection_bear)
+        _htf_ok  = (_actual_dir == 1 and htf_bull) or (_actual_dir == -1 and htf_bear)
+        _htfs_ok = (_actual_dir == 1 and htf_strong_bull) or (_actual_dir == -1 and htf_strong_bear)
+        _vol_ok  = (_actual_dir == 1 and vol_bull) or (_actual_dir == -1 and vol_bear)
+        _score_raw = (_ba >= _atr14 * momentum_thresh * 0.4 ? 1 : 0) + (_a5_ok ? 1 : 0) + (_ema_ok ? 1 : 0) + (_sess_ok ? 1 : 0) + (_rsi_ok ? 1 : 0) + (_bb_ok ? 1 : 0) + (_vwap_ok ? 1 : 0) + (_cand_ok ? 1 : 0) + (_tma_ok ? 1 : 0) + (_htf_ok ? 1 : 0) + (_htfs_ok ? 1 : 0) + (_vol_ok ? 1 : 0) - (vol_climax ? 1 : 0)
+        _score = math.max(0, _score_raw)
+        _strong = _score >= 4 and (_bc >= _atr14 * momentum_thresh or _bp >= _atr14 * momentum_thresh)
+        _medium = not _strong and _score >= 1
+        _arr    = _actual_dir == 1 ? "↑" : "↓"
+        _dots   = _score >= 9 ? "●●●●●" : _score >= 7 ? "●●●●" : _score >= 5 ? "●●●" : _score >= 3 ? "●●" : _score >= 1 ? "●" : "○"
+        _htag   = _htfs_ok ? " HTF✓✓" : _htf_ok ? " HTF✓" : ""
+        _vtag   = _vol_ok ? " Vol✓" : vol_climax ? " VolX" : ""
+        _stag   = _dots + _htag + _vtag
+        _ctxt  = _strong ? (_actual_dir == 1 ? "BUY " : "SELL ") + "✓ " + _stag : _medium ? (_actual_dir == 1 ? "Chance BUY " : "Chance SELL ") + _stag : "Watch " + _arr + " " + _stag
+        _ccol  = _strong ? (_actual_dir == 1 ? color.new(color.green, 0) : color.new(color.red, 0)) : _medium ? color.new(color.orange, 20) : color.new(color.purple, 50)
+        _clcol = _strong ? (_actual_dir == 1 ? color.new(color.green, 20) : color.new(color.red, 20)) : _medium ? color.new(color.orange, 40) : color.new(color.purple, 60)
+        _cy    = low - _atr14 * 0.5
+        label.delete(confirm_lbl)
+        line.delete(confirm_ln)
+        // Clear TMN Watch when confirm fires — they shouldn't coexist
+        label.delete(ready_lbl)
+        line.delete(ready_ln)
+        line.delete(ready_horiz)
+        ready_lbl   := na
+        ready_ln    := na
+        ready_horiz := na
+        confirm_lbl := label.new(x=bar_index, y=_cy, text=_ctxt,
+         style=label.style_label_up, color=_ccol,
+         textcolor=color.white, size=_strong ? size.normal : size.small)
+        confirm_ln  := line.new(x1=bar_index, y1=_cy, x2=bar_index, y2=low,
+         color=_clcol, width=1, style=line.style_dashed)
+        confirm_bar := bar_index
+        confirm_dir := _actual_dir
+        ready_fired      := false
+        breakout_alerted := false
+
+    else if _cur_match and na(confirm_lbl)
+        _tl_str  = not na(last_peak_level) ? " " + str.tostring(math.round(last_peak_level * 10) / 10) : ""
+        _rtxt    = (_actual_dir == 1 ? "▲ TL+ Watch" : "▼ TL- Watch") + _tl_str
+        _rcol    = _actual_dir == 1 ? color.new(color.teal, 20) : color.new(color.maroon, 20)
+        _rlcol   = _actual_dir == 1 ? color.new(color.teal, 50) : color.new(color.maroon, 50)
+        _ry      = low - ta.atr(14) * 0.5
+        label.delete(ready_lbl)
+        line.delete(ready_ln)
+        line.delete(ready_horiz)
+        ready_lbl   := label.new(x=bar_index + 1, y=_ry, text=_rtxt,
+         style=label.style_label_left, color=_rcol, textcolor=color.white, size=size.small)
+        ready_ln    := line.new(x1=bar_index, y1=_ry, x2=bar_index, y2=low,
+         color=_rlcol, width=1, style=line.style_dashed)
+        ready_horiz := line.new(x1=bar_index - 5, y1=_ry, x2=bar_index, y2=_ry,
+         color=_rcol, width=1, style=line.style_solid)
+        ready_fired := true
+
+    else if not _cur_match
+        label.delete(ready_lbl)
+        line.delete(ready_ln)
+        line.delete(ready_horiz)
+        ready_lbl   := na
+        ready_ln    := na
+        ready_horiz := na
+        ready_fired := false
+
+// ── CONFIRMED EXPIRY ─────────────────────────────────────
+if not na(confirm_lbl) and not na(confirm_bar) and bar_index > confirm_bar + confirm_expire
+    _expired = (confirm_dir == 1 and close < low[confirm_expire]) or (confirm_dir == -1 and close > high[confirm_expire])
+    if _expired
+        label.delete(confirm_lbl)
+        line.delete(confirm_ln)
+        confirm_lbl := na
+        confirm_ln  := na
+        confirm_bar := na
+        confirm_dir := 0
+
+// ── PROXIMITY CHANCE LABEL EXPIRY ────────────────────────
+if not na(prox_lbl) and not na(prox_fire_bar) and bar_index > prox_fire_bar + confirm_expire
+    line.delete(prox_ln)
+    prox_lbl      := na
+    prox_ln       := na
+    prox_fire_bar := na
+
+// ── A5 CROSS LABEL EXPIRY — fade to grey after confirm_expire bars ────────
+// Keeps historical context visible but stops it looking like an active signal
+if not na(a5cross_lbl) and not na(a5cross_bar) and bar_index == a5cross_bar + confirm_expire
+    label.set_color(a5cross_lbl, color.new(color.gray, 40))
+    label.set_textcolor(a5cross_lbl, color.new(color.white, 50))
+    a5cross_lbl := na   // stop tracking — label stays on chart, greyed out
+    a5cross_bar := na
+
+// ── TL INVALIDATION + EXPIRY ──────────────────────────────
+// Rules: delete silently if
+//   1. Target reached (price pulled back and hit TL)
+//   2. Price moved 2×ATR BEYOND TL in wrong direction (hard invalidation)
+//   3. 20 bars elapsed (1 hour 40min) — safety timeout only
+if not na(tl_fixed) and not na(tl_fixed_bar)
+    _tl_target_met   = tl_fixed_dir == 1 ? close <= tl_fixed : close >= tl_fixed
+    _tl_bars_expired = bar_index - tl_fixed_bar > _tl_timeout
+    // Hard invalidation: bull = price crashed 2xATR below tma_lower (structure broken)
+    //                   bear = price surged 2xATR above tma_upper (structure broken)
+    _tl_deviated     = tl_fixed_dir == 1 ? close < tl_fixed - tl_fixed_atr * 2.0 : close > tl_fixed + tl_fixed_atr * 2.0
+    if _tl_target_met or _tl_bars_expired or _tl_deviated
+        tl_fixed       := na
+        tl_fixed_atr   := na
+        tl_fixed_bar   := na
+        tl_fixed_dir   := 0
+        tl_inval_level := na
+
+// ── TL LINE + LABELS (TAD layout) ────────────────────────
+// TL = tma_lower (bull) or tma_upper (bear) — fixed at TMN fire bar
+// Ready score = (tl_fixed - close) / atr(200) — TAD normalization
+// Bull (+): vertical line from candle LOW up to TL | TL label at top | Ready label BELOW TL at right
+// Bear (-): vertical line from candle HIGH down to TL | TL label at bottom | Ready label ABOVE TL at right
+var line tl_vert_candle = na
+var line tl_horiz       = na
+if barstate.islast
+    line.delete(tl_line)
+    line.delete(tl_vert_candle)
+    line.delete(tl_horiz)
+    label.delete(tl_lbl_ready)
+    label.delete(tl_lbl_price)
+    if not na(tl_fixed) and not na(tl_fixed_bar)
+        _tl_bull    = tl_fixed_dir == 1
+        _tl_col     = _tl_bull ? color.new(color.teal, 20)  : color.new(color.red, 20)
+        _tl_col_lbl = _tl_bull ? color.new(color.teal, 0)   : color.new(color.red, 0)
+        // Ready score: (tl_fixed - close) / atr200 — TAD normalization
+        _ready_score  = (tl_fixed - close) / atr200
+        _score_str    = str.tostring(math.round(_ready_score, 4))
+        _tl_dir_str   = _tl_bull ? "TL+" : "TL-"
+        _tl_arrow     = _tl_bull ? "▲" : "▼"
+        // 1. Horizontal dashed line extending right from fire bar
+        tl_horiz := line.new(
+         x1=tl_fixed_bar, y1=tl_fixed,
+         x2=bar_index + 15, y2=tl_fixed,
+         color=_tl_col, width=2, style=line.style_dashed)
+        // 2. Large TL direction badge + price + score at right edge
+        tl_lbl_price := label.new(
+         x=bar_index + 1, y=tl_fixed,
+         text=_tl_arrow + " " + _tl_dir_str + "  " + str.tostring(math.round(tl_fixed, 2)) + "  " + _score_str,
+         style=_tl_bull ? label.style_label_left : label.style_label_left,
+         color=_tl_col_lbl, textcolor=color.white, size=size.normal)
+
+// ── SIDEWAYS DETECTION ───────────────────────────────────
+// ── SIDEWAYS DETECTION — 1-hour compression + A5 trend confirmation ──────
+// Trigger:      past hour range tight vs ATR-based expected random-walk range
+// Confirmation: A5 slope also flat — filters out pauses inside strong trends
+_sw_bars      = _sw_bars_r                                                 // 1 hour on 5m
+_sw_high      = ta.highest(high, _sw_bars)
+_sw_low       = ta.lowest(low,   _sw_bars)
+_sw_range     = _sw_high - _sw_low
+_sw_range_pct = (_sw_range / close) * 100
+// Expected range = ATR × sqrt(bars) — random walk baseline
+_sw_expected  = atr * math.sqrt(_sw_bars)
+_sw_atr_ratio = _sw_range / _sw_expected                          // <1.0 = tighter than expected
+_ema_slope    = math.abs(pl - pl[5]) / atr                        // EMA slope for score
+// A5 flatness confirmation — A5 barely moved in last 6 bars (half the lookback)
+_a5_flat      = math.abs(a5 - a5[6]) < atr * 0.3
+_is_sideways  = _sw_atr_ratio < 1.2 and _a5_flat                  // compression + trend flat
+
+// ── SIDEWAYS STRENGTH SCORE (0–100%) ─────────────────────
+// 1. Range compression (40%) — how tight vs random-walk expectation
+// 2. A5 flatness       (30%) — how little A5 has moved in 6 bars
+// 3. EMA flatness      (20%) — how little PL EMA has moved
+// 4. RSI midpoint      (10%) — RSI near 50 = no directional pressure
+_sw_atr_score = math.max(0.0, 1.0 - (_sw_atr_ratio / 1.2))
+_sw_a5_score  = math.max(0.0, 1.0 - (math.abs(a5 - a5[6]) / (atr * 0.3)))
+_sw_ema_score = math.max(0.0, 1.0 - (_ema_slope / 0.5))
+_sw_rsi_score = 1.0 - math.min(1.0, math.abs(rsi14 - 50.0) / 25.0)
+_sw_pct       = math.round((_sw_atr_score * 0.4 + _sw_a5_score * 0.3 + _sw_ema_score * 0.2 + _sw_rsi_score * 0.1) * 100)
+
+var label sw_lbl = na
+label.delete(sw_lbl)
+if show_sideways and _is_sideways and _sw_pct >= 50 and barstate.islast
+    _sw_col  = _sw_pct >= 80 ? color.new(color.red, 20) : _sw_pct >= 65 ? color.new(color.orange, 20) : color.new(color.gray, 20)
+    _sw_text = "↔ Sideways " + str.tostring(_sw_pct) + "%"
+             + "\nRange: " + str.tostring(math.round(_sw_range, 1)) + "pt"
+             + "  (" + str.tostring(math.round(_sw_range_pct, 2)) + "%)"
+    sw_lbl  := label.new(x=bar_index + 2, y=_sw_high + atr * 0.5,
+     text=_sw_text, style=label.style_label_down,
+     color=_sw_col, textcolor=color.white, size=size.small)
+
+// ── TMN OUTCOME EVALUATION ───────────────────────────────
+if not na(tmn_outcome_bar) and not na(tmn_outcome_ref)
+    _bars_since = bar_index - tmn_outcome_bar
+    if _bars_since == confirm_expire
+        _target_move = atr * 1.5
+        _bull_win = tmn_outcome_dir == 1  and high >= tmn_outcome_ref + _target_move
+        _bear_win = tmn_outcome_dir == -1 and low  <= tmn_outcome_ref - _target_move
+        _won = _bull_win or _bear_win
+        _outcome_y   = tmn_outcome_dir == 1 ? low[_bars_since] - atr * 1.5 : high[_bars_since] + atr * 1.5
+        _outcome_sty = tmn_outcome_dir == 1 ? label.style_label_up : label.style_label_down
+        label.new(x=tmn_outcome_bar, y=_outcome_y,
+         text=(_won ? "✓" : "✗"), style=_outcome_sty,
+         color=(_won ? color.new(color.green, 20) : color.new(color.red, 20)),
+         textcolor=color.white, size=size.tiny)
+        tmn_outcome_bar := na
+        tmn_outcome_ref := na
+
+// ── PLOTS ────────────────────────────────────────────────
+plot(pl, "PL EMA(25)",            color=show_pl ? color.orange : na, linewidth=2)
+plot(a5, "A5 TMA(open,50)",       color=show_a5 ? color.purple : na, linewidth=1)
+plot(c1, "C1: SessionSMA(close)", color=show_c1 ? color.navy   : na, linewidth=1)
+plot(c2, "C2: SessionSMA(hlc3)",  color=show_c2 ? color.fuchsia : na, linewidth=1)
+
+bias_bear_pts = (_struct_bear ? 2 : 0) + (bias_bear ? 1 : 0) + (ema_trend == -1 ? 1 : 0) + (price_below_ema ? 1 : 0) + (htf_bear ? 1 : 0) + (htf_strong_bear ? 1 : 0) + (a5_trend == -1 ? 1 : 0) + (c1 > c2 ? 1 : 0)
+bias_bull_pts = (_struct_bull ? 2 : 0) + (bias_bull ? 1 : 0) + (ema_trend == 1 ? 1 : 0) + (price_above_ema ? 1 : 0) + (htf_bull ? 1 : 0) + (htf_strong_bull ? 1 : 0) + (a5_trend == 1 ? 1 : 0) + (c1 < c2 ? 1 : 0)
+bias_net      = bias_bull_pts - bias_bear_pts
+
+// ── WEBHOOK DATA PLOTS (for AI bot alerts) ────────────────
+// These feed into TradingView webhook JSON via {{plot("NAME")}}
+plot(atr,                                              title="ATR14",       display=display.data_window)
+plot(rsi14,                                            title="RSI14",       display=display.data_window)
+plot(bias_net,                                         title="BIAS_NET",    display=display.data_window)
+plot(math.abs(close - a5) / atr,                       title="A5_DIST",     display=display.data_window)
+plot(stmn_bull or stmn_bear ? 1 : 0,                   title="STMN",        display=display.data_window)
+plot(tma_lower,                                        title="TMA_LOWER",   display=display.data_window)
+plot(a5,                                               title="TMA_MIDDLE",  display=display.data_window)
+plot(tma_upper,                                        title="TMA_UPPER",   display=display.data_window)
+plot(tad_buy_thresh,                                   title="BUY_THRESH",  display=display.data_window)
+plot(tad_sell_thresh,                                  title="SELL_THRESH", display=display.data_window)
+plot(not na(tl_fixed) ? (tl_fixed - close) / atr200 : na, title="TL_SCORE", display=display.data_window)
+// ── TMN LABELS ───────────────────────────────────────────
+// Trend-filtered: requires stmn + reversal candle + not counter-trend HTF/bias
+tmn_cool = na(last_tmn) or bar_index - last_tmn >= enter_cooldown * 2
+if tmn_bear_signal and tmn_cool
+    if bias_net >= 2
+        counter_tmn_active := true
+        counter_tmn_bar    := bar_index
+    _td = _tmn_bear_count >= 7 ? "●●●●●" : _tmn_bear_count >= 6 ? "●●●●" : _tmn_bear_count >= 5 ? "●●●" : "●●"
+    label.delete(tmn_lbl)
+    _tmn_bear_y = high + atr * 0.6
+    tmn_lbl := label.new(x=bar_index, y=_tmn_bear_y,
+     text="TMN- " + _td, style=label.style_label_down,
+     color=color.new(color.orange, 10), textcolor=color.white, size=size.small)
+    line.delete(tmn_ln)
+    tmn_ln := line.new(x1=bar_index, y1=_tmn_bear_y, x2=bar_index, y2=high,
+     color=color.new(color.orange, 30), width=1, style=line.style_dashed)
+    last_tmn        := bar_index
+    tl_fixed        := tma_upper
+    tl_fixed_atr    := atr
+    tl_fixed_bar    := bar_index
+    tl_fixed_dir    := -1
+    tl_inval_level  := high
+    tmn_outcome_bar := bar_index
+    tmn_outcome_dir := -1
+    tmn_outcome_ref := close
+if tmn_bull_signal and tmn_cool
+    if bias_net <= -2
+        counter_tmn_active := true
+        counter_tmn_bar    := bar_index
+    _td = _tmn_bull_count >= 7 ? "●●●●●" : _tmn_bull_count >= 6 ? "●●●●" : _tmn_bull_count >= 5 ? "●●●" : "●●"
+    label.delete(tmn_lbl)
+    _tmn_bull_y = low - atr * 0.6
+    tmn_lbl := label.new(x=bar_index, y=_tmn_bull_y,
+     text="TMN+ " + _td, style=label.style_label_up,
+     color=color.new(color.green, 10), textcolor=color.white, size=size.small)
+    line.delete(tmn_ln)
+    tmn_ln := line.new(x1=bar_index, y1=_tmn_bull_y, x2=bar_index, y2=low,
+     color=color.new(color.green, 30), width=1, style=line.style_dashed)
+    last_tmn        := bar_index
+    tl_fixed        := tma_lower
+    tl_fixed_atr    := atr
+    tl_fixed_bar    := bar_index
+    tl_fixed_dir    := 1
+    tl_inval_level  := low
+    tmn_outcome_bar := bar_index
+    tmn_outcome_dir := 1
+    tmn_outcome_ref := close
+
+// ── DATA WINDOW ──────────────────────────────────────────
+plot(close, "Verify: Close",             display=display.data_window)
+plot(pl,    "Verify: PL",                display=display.data_window)
+plot(a5,    "Verify: A5-TMAopen50",      display=display.data_window)
+plot(c1,    "Verify: C1-SessSMA_close",  display=display.data_window)
+plot(c2,    "Verify: C2-SessSMA_hlc3",   display=display.data_window)
+
+// ── BIAS NET SCORE (shared between bias label and projection label) ─────
+
+// ── PERSISTENT TREND BIAS LABEL (right edge, updates every bar) ──────────
+// Always visible — shows current directional read even when no signal fires
+var label bias_lbl = na
+if barstate.islast
+    label.delete(bias_lbl)
+
+
+    _bias_dir   = bias_net >= 2 ? "▲ BIAS UP" : bias_net <= -2 ? "▼ BIAS DOWN" : "◆ NEUTRAL"
+    _bias_str   = math.abs(bias_net) >= 6 ? " ●●●" : math.abs(bias_net) >= 4 ? " ●●" : math.abs(bias_net) >= 2 ? " ●" : ""
+    _htf_str    = htf_strong_bull ? " | HTF ▲▲" : htf_bull ? " | HTF ▲" : htf_strong_bear ? " | HTF ▼▼" : htf_bear ? " | HTF ▼" : " | HTF –"
+    _dist_atr   = math.round(math.abs(close - a5) / atr * 10) / 10
+    _side       = close > a5 ? "above" : "below"
+    _a5_str     = " | A5 " + _side + " " + str.tostring(_dist_atr) + "x"
+    _full_text  = _bias_dir + _bias_str + _htf_str + _a5_str
+    _bias_col   = bias_net >= 4 ? color.new(color.green, 10) : bias_net >= 2 ? color.new(color.green, 35) : bias_net <= -4 ? color.new(color.red, 10) : bias_net <= -2 ? color.new(color.red, 35) : color.new(color.gray, 30)
+    bias_lbl := label.new(x=bar_index + 2, y=close,
+     text=_full_text, style=label.style_label_left,
+     color=_bias_col, textcolor=color.white, size=size.small)
+
+// ── SHARED PROJECTION VARS (calculated every bar, used by both proj + wait labels) ──
+_a5_slope_now_s  = a5 - a5[3]
+_a5_slope_prev_s = a5[3] - a5[6]
+_a5_still_down_s = _a5_slope_now_s < 0 and _a5_slope_prev_s < 0
+_a5_still_up_s   = _a5_slope_now_s > 0 and _a5_slope_prev_s > 0
+_ema_still_down_s = (pl - pl[3]) < 0
+_ema_still_up_s   = (pl - pl[3]) > 0
+_mom1_s = close - close[1]
+_mom2_s = close[1] - close[2]
+_mom3_s = close[2] - close[3]
+_bear_accel_s = _mom1_s < _mom2_s and _mom2_s < _mom3_s
+_bull_accel_s = _mom1_s > _mom2_s and _mom2_s > _mom3_s
+_bear_fading_s = _mom1_s < 0 and _mom1_s > _mom2_s
+_bull_fading_s = _mom1_s > 0 and _mom1_s < _mom2_s
+_last3_bear_s = close < open and close[1] < open[1] and close[2] < open[2]
+_last3_bull_s = close > open and close[1] > open[1] and close[2] > open[2]
+_doji_now_s   = math.abs(close - open) < atr * 0.15
+_snap_imminent_s = math.abs(close - a5) / atr >= 3.0
+_snap_extreme_s  = math.abs(close - a5) / atr >= 4.5
+_rsi_oversold_s   = rsi14 < 30
+_rsi_overbought_s = rsi14 > 70
+_rsi_extreme_bear_s = rsi14 < 25
+_rsi_extreme_bull_s = rsi14 > 75
+proj_score = 0 + (_a5_still_down_s ? -2 : 0) + (_a5_still_up_s ? 2 : 0) + (_ema_still_down_s ? -1 : 0) + (_ema_still_up_s ? 1 : 0) + (_bear_accel_s ? -2 : 0) + (_bull_accel_s ? 2 : 0) + (_bear_fading_s ? 1 : 0) + (_bull_fading_s ? -1 : 0) + (_last3_bear_s ? -1 : 0) + (_last3_bull_s ? 1 : 0) + (htf_strong_bear ? -2 : htf_bear ? -1 : 0) + (htf_strong_bull ? 2 : htf_bull ? 1 : 0) + (_rsi_extreme_bear_s ? 2 : _rsi_oversold_s ? 1 : 0) + (_rsi_extreme_bull_s ? -2 : _rsi_overbought_s ? -1 : 0)
+proj_dir   = proj_score <= -5 ? "CONTINUE DOWN" : proj_score <= -2 ? "LIKELY DOWN" : proj_score >= 5 ? "CONTINUE UP" : proj_score >= 2 ? "LIKELY UP" : "UNCERTAIN"
+bounce_bear = proj_score > 0 and bias_net <= -2
+bounce_bull = proj_score < 0 and bias_net >= 2
+
+// ── SHORT-TERM TREND PROJECTION LABEL (next 5-25 min) ────────────────────
+var label proj_lbl = na
+if barstate.islast
+    label.delete(proj_lbl)
+
+    // ── Momentum: is current move accelerating or fading?
+    _mom1 = close - close[1]
+    _mom2 = close[1] - close[2]
+    _mom3 = close[2] - close[3]
+    _bear_accel = _mom1 < _mom2 and _mom2 < _mom3                  // each bar falling more
+    _bull_accel = _mom1 > _mom2 and _mom2 > _mom3                  // each bar rising more
+    _bear_fading = _mom1 < 0 and _mom1 > _mom2                     // still down but slowing
+    _bull_fading = _mom1 > 0 and _mom1 < _mom2                     // still up but slowing
+
+    // ── A5 slope: still curving same direction?
+    _a5_slope_now  = a5 - a5[3]
+    _a5_slope_prev = a5[3] - a5[6]
+    _a5_still_down = _a5_slope_now < 0 and _a5_slope_prev < 0
+    _a5_still_up   = _a5_slope_now > 0 and _a5_slope_prev > 0
+    _a5_flattening = math.abs(_a5_slope_now) < math.abs(_a5_slope_prev) * 0.6
+
+    // ── EMA slope
+    _ema_slope_now  = pl - pl[3]
+    _ema_still_down = _ema_slope_now < 0
+    _ema_still_up   = _ema_slope_now > 0
+
+    // ── RSI exhaustion
+    _rsi_oversold  = rsi14 < 30
+    _rsi_overbought = rsi14 > 70
+    _rsi_extreme_bear = rsi14 < 25
+    _rsi_extreme_bull = rsi14 > 75
+
+    // ── Distance from A5 (mean reversion pressure)
+    _dist_now = math.abs(close - a5) / atr
+    _snap_imminent = _dist_now >= 3.0                              // 3+ ATRs = stretched
+    _snap_extreme  = _dist_now >= 4.5                              // 4.5+ ATRs = very stretched
+
+    // ── Candle structure last 3 bars
+    _last3_bear = close < open and close[1] < open[1] and close[2] < open[2]
+    _last3_bull = close > open and close[1] > open[1] and close[2] > open[2]
+    _doji_now   = math.abs(close - open) < atr * 0.15             // indecision candle
+
+    // ── Projection scoring
+    // Positive = bullish outlook, Negative = bearish outlook
+    _proj_score = proj_score
+    // Mean reversion pressure pushes score toward 0
+    // RSI exhaustion
+    // Indecision candle = uncertainty
+
+    // ── Time estimate (rougher = more honest)
+    _timeframe_mins = timeframe.in_seconds() / 60
+    _bars_est = _snap_extreme ? 2 : _snap_imminent ? 3 : math.abs(_proj_score) >= 6 ? 5 : 3
+    _mins_est = math.round(_bars_est * _timeframe_mins)
+    _mins_lo  = _mins_est
+    _mins_hi  = _mins_est * 5
+    _time_str = "~" + str.tostring(_mins_lo) + "-" + str.tostring(_mins_hi) + "min"
+
+    // ── Build label text
+    _warn_str = _snap_extreme ? " ⚡EXTREME STRETCH" : _snap_imminent ? " ⚠ stretched" : ""
+    _rsi_str  = _rsi_extreme_bear ? " RSI:" + str.tostring(math.round(rsi14)) + " extreme" : _rsi_oversold ? " RSI:" + str.tostring(math.round(rsi14)) + " oversold" : _rsi_extreme_bull ? " RSI:" + str.tostring(math.round(rsi14)) + " extreme" : _rsi_overbought ? " RSI:" + str.tostring(math.round(rsi14)) + " overbought" : ""
+    _mom_str  = _bear_accel ? " mom:▼▼" : _bull_accel ? " mom:▲▲" : _bear_fading ? " mom:fade" : _bull_fading ? " mom:fade" : ""
+
+    _proj_icon = _proj_score <= -5 ? "📉" : _proj_score <= -2 ? "🔻" : _proj_score >= 5 ? "📈" : _proj_score >= 2 ? "🔺" : "↔"
+    _proj_dir  = _proj_score <= -5 ? "CONTINUE DOWN" : _proj_score <= -2 ? "LIKELY DOWN" : _proj_score >= 5 ? "CONTINUE UP" : _proj_score >= 2 ? "LIKELY UP" : "UNCERTAIN"
+
+    // Override: if strongly stretched against trend, label as bounce watch
+    _bounce_bear = bounce_bear
+    _bounce_bull = bounce_bull
+    _proj_icon := _bounce_bear ? "↩" : _bounce_bull ? "↪" : _proj_icon
+    _proj_dir  := _bounce_bear ? "BOUNCE WATCH" : _bounce_bull ? "PULLBACK WATCH" : _proj_dir
+
+    _proj_text = _proj_icon + " " + _proj_dir + " " + _time_str + _warn_str + _rsi_str + _mom_str
+
+    _proj_col = _proj_score <= -3 ? color.new(color.red, 20) : _proj_score >= 3 ? color.new(color.green, 20) : _bounce_bear ? color.new(color.orange, 20) : _bounce_bull ? color.new(color.orange, 20) : color.new(color.gray, 30)
+
+    // Position below bias label
+    _proj_y = close - atr * 1.5
+    proj_lbl := label.new(x=bar_index + 2, y=_proj_y,
+     text=_proj_text, style=label.style_label_left,
+     color=_proj_col, textcolor=color.white, size=size.small)
+
+// ── CLEAR COUNTER TMN FLAG after expire
+if counter_tmn_active and not na(counter_tmn_bar)
+    if bar_index - counter_tmn_bar > confirm_expire * 2
+        counter_tmn_active := false
+        counter_tmn_bar    := na
+
+// ── WAIT / DO NOTHING LABEL ───────────────────────────────────────────────
+// Fires when price is in no-man's land — no clear edge, bad risk/reward
+var label wait_lbl = na
+var string _do_nothing_reason = ""
+var string _do_nothing_watch  = ""
+var bool   _do_nothing_active = false
+if barstate.islast
+    label.delete(wait_lbl)
+
+    // Conditions for no-man's land
+    _dist_from_a5   = math.abs(close - a5) / atr
+    _between_lines  = close > tad_buy_thresh and close < tad_sell_thresh   // inside TAD threshold zone
+    _mom_fading     = (proj_score > -2 and proj_score < 2)    // no clear momentum
+    _bounce_in_prog = bounce_bear or bounce_bull               // bouncing against bias
+    _no_signal      = na(confirm_lbl) and na(prox_lbl) and not breakout_alerted
+
+    // Extended but no reversal signal yet
+    _extended_no_signal = _dist_from_a5 >= 2.5 and _no_signal
+
+    // Inside bands with mixed signals
+    _mixed_inside = _between_lines and math.abs(bias_net) <= 2 and _no_signal
+
+    // Momentum fading after strong move
+    _exhausted = _mom_fading and math.abs(bias_net) >= 2 and _no_signal and _dist_from_a5 >= 1.0
+
+    _counter_tmn  = counter_tmn_active
+    // Suppress DO NOTHING when bias is strongly directional and price is extended — PULLBACK WATCH handles this
+    _strong_directional = math.abs(bias_net) >= 3 and _dist_from_a5 >= 2.0
+    _should_wait = not _strong_directional and (_bounce_in_prog or _extended_no_signal or _mixed_inside or _exhausted or _counter_tmn)
+
+    if _should_wait
+        // Build reason string
+        _reason = _counter_tmn      ? "counter-trend signal — bias still " + (bias_net <= -2 ? "DOWN" : "UP") + ", wait" :
+                  _bounce_in_prog    ? "counter-trend bounce — let it play out" :
+                  _extended_no_signal ? "extended from A5 — no reversal signal yet" :
+                  _mixed_inside       ? "inside bands — no clear edge" :
+                  _exhausted          ? "momentum fading — wait for new setup" : "no clear edge"
+
+        // What to watch for
+        _watch = bias_net <= -2 ? "Watch: price back to A5 (" + str.tostring(math.round(a5, 1)) + ") for SELL setup" : bias_net >= 2 ? "Watch: A5 (" + str.tostring(math.round(a5, 1)) + ") cross for BUY setup" : "Watch: bias label for direction"
+
+        _wait_text = "⏸ DO NOTHING  |  " + _reason + "\n" + _watch
+
+        _wait_y = close - atr * 3.0
+        wait_lbl := label.new(x=bar_index + 2, y=_wait_y,
+         text=_wait_text, style=label.style_label_left,
+         color=color.new(color.gray, 15),
+         textcolor=color.white, size=size.small)
+
+        _do_nothing_reason := _reason
+        _do_nothing_watch  := _watch
+        _do_nothing_active := true
+    else
+        _do_nothing_reason := ""
+        _do_nothing_watch  := ""
+        _do_nothing_active := false
+
+// ── SHORT TRADE MODE ─────────────────────────────────────────────────────
+// Fires on TMN+/- regardless of trend bias — designed for quick 2-5 candle holds
+// Shows entry, target, stop and expected hold time
+_mode_trend  = trade_mode == "Trend" or trade_mode == "Both"
+_mode_short  = trade_mode == "Short Trade" or trade_mode == "Both"
+
+// Short trade conditions
+_st_dist     = math.abs(close - a5) / atr                          // distance from A5 in ATRs (used for hold time)
+_st_ext_ok   = close <= tad_buy_thresh or close >= tad_sell_thresh  // price beyond TAD threshold — TAD-aligned extension check
+_st_bull_rsi = rsi14 <= _rsi_thresh                        // oversold for buy
+_st_bear_rsi = rsi14 >= (100 - _rsi_thresh)               // overbought for sell
+_st_cool     = na(last_tmn) or bar_index - last_tmn >= enter_cooldown * 2
+
+// Counter-trend bias block — suppress Quick trade when bias is strongly against it
+// Threshold -3/+3 allows mild counter moves but blocks strong trend opposition
+_st_buy_bias_ok  = bias_net > -2   // blocks if bear bias score ≤ -2 (neutral or better required)
+_st_sell_bias_ok = bias_net < 2    // blocks if bull bias score ≥ +2 (neutral or better required)
+
+// Short BUY: TMN+ fires + extended + bias not strongly bearish
+_short_buy  = _mode_short and tmn_bull_signal and _st_cool and _st_ext_ok and _st_buy_bias_ok
+
+// Short SELL: TMN- fires + extended + bias not strongly bullish
+_short_sell = _mode_short and tmn_bear_signal and _st_cool and _st_ext_ok and _st_sell_bias_ok
+
+// Hide trend labels when in Short Trade only mode
+_hide_trend = trade_mode == "Short Trade"
+
+var label st_lbl  = na
+var label st_lbl2 = na
+var line  st_tp   = na
+var line  st_sl   = na
+
+// Always clear previous Quick trade visuals when any new signal fires
+if _short_buy or _short_sell
+    label.delete(st_lbl)
+    label.delete(st_lbl2)
+    line.delete(st_tp)
+    line.delete(st_sl)
+    st_lbl  := na
+    st_lbl2 := na
+    st_tp   := na
+    st_sl   := na
+
+if _short_buy
+    label.delete(st_lbl)
+    label.delete(st_lbl2)
+    line.delete(st_tp)
+    line.delete(st_sl)
+
+    // ATR-based TP/SL — scales with current volatility
+    _atr_now   = ta.atr(14)
+    _tp_pts    = math.round(_atr_now * short_tp_atr * 100) / 100
+    _sl_pts    = math.round(_atr_now * short_sl_atr * 100) / 100
+    _tp_price  = close + _tp_pts
+    _sl_price  = close - _sl_pts
+    _rr        = math.round(_tp_pts / _sl_pts * 10) / 10
+    // Hold time scales with how extended price is — more stretched = needs more bars to snap back
+    _bars_hold = _st_dist >= 3.5 ? 5 : _st_dist >= 2.5 ? 4 : 3
+    _mins_hold = _bars_hold * math.round(timeframe.in_seconds() / 60)
+
+    // Entry label
+    st_lbl := label.new(x=bar_index, y=low - atr * 1.2,
+     text="⚡ QUICK BUY\nEntry: " + str.tostring(math.round(close, 2)) +
+          "\nTP: +" + str.tostring(math.round(_tp_pts, 2)) + " → " + str.tostring(math.round(_tp_price, 2)) +
+          "\nSL: -" + str.tostring(math.round(_sl_pts, 2)) + " → " + str.tostring(math.round(_sl_price, 2)) +
+          "\nR:R = 1:" + str.tostring(_rr) +
+          "\nATR: " + str.tostring(math.round(_atr_now, 2)) +
+          "\nHold ~" + str.tostring(_mins_hold) + "min max" +
+          "\nBias: " + (bias_net <= -2 ? "⚠ Counter-trend" : "✓ With bias"),
+     style=label.style_label_up,
+     color=color.new(color.teal, 0), textcolor=color.white, size=size.small)
+
+    // TP line
+    st_tp := line.new(x1=bar_index, y1=_tp_price, x2=bar_index + 8, y2=_tp_price,
+     color=color.new(color.green, 20), width=2, style=line.style_dashed)
+
+    // SL line
+    st_sl := line.new(x1=bar_index, y1=_sl_price, x2=bar_index + 8, y2=_sl_price,
+     color=color.new(color.red, 20), width=2, style=line.style_dashed)
+
+if _short_sell
+    label.delete(st_lbl)
+    label.delete(st_lbl2)
+    line.delete(st_tp)
+    line.delete(st_sl)
+
+    // ATR-based TP/SL — scales with current volatility
+    _atr_now   = ta.atr(14)
+    _tp_pts    = math.round(_atr_now * short_tp_atr * 100) / 100
+    _sl_pts    = math.round(_atr_now * short_sl_atr * 100) / 100
+    _tp_price  = close - _tp_pts
+    _sl_price  = close + _sl_pts
+    _rr        = math.round(_tp_pts / _sl_pts * 10) / 10
+    // Hold time scales with how extended price is
+    _bars_hold = _st_dist >= 3.5 ? 5 : _st_dist >= 2.5 ? 4 : 3
+    _mins_hold = _bars_hold * math.round(timeframe.in_seconds() / 60)
+
+    st_lbl := label.new(x=bar_index, y=high + atr * 1.2,
+     text="⚡ QUICK SELL\nEntry: " + str.tostring(math.round(close, 2)) +
+          "\nTP: -" + str.tostring(math.round(_tp_pts, 2)) + " → " + str.tostring(math.round(_tp_price, 2)) +
+          "\nSL: +" + str.tostring(math.round(_sl_pts, 2)) + " → " + str.tostring(math.round(_sl_price, 2)) +
+          "\nR:R = 1:" + str.tostring(_rr) +
+          "\nATR: " + str.tostring(math.round(_atr_now, 2)) +
+          "\nHold ~" + str.tostring(_mins_hold) + "min max" +
+          "\nBias: " + (bias_net >= 2 ? "⚠ Counter-trend" : "✓ With bias"),
+     style=label.style_label_down,
+     color=color.new(color.orange, 0), textcolor=color.white, size=size.small)
+
+    st_tp := line.new(x1=bar_index, y1=_tp_price, x2=bar_index + 8, y2=_tp_price,
+     color=color.new(color.green, 20), width=2, style=line.style_dashed)
+
+    st_sl := line.new(x1=bar_index, y1=_sl_price, x2=bar_index + 8, y2=_sl_price,
+     color=color.new(color.red, 20), width=2, style=line.style_dashed)
+
+// Hide trend-mode labels when Short Trade only
+if _hide_trend
+    if not na(confirm_lbl)
+        label.delete(confirm_lbl)
+        confirm_lbl := na
+    if not na(ready_lbl)
+        label.delete(ready_lbl)
+        line.delete(ready_ln)
+        ready_lbl := na
+        ready_ln  := na
+    if not na(breakout_lbl)
+        label.delete(breakout_lbl)
+        breakout_lbl := na
+    if not na(tmn_lbl)
+        label.delete(tmn_lbl)
+        tmn_lbl := na
+
+// Suppress Quick trade label if bias turns strongly against it after firing
+// BUY label killed when bear bias reaches -3 or stronger
+// SELL label killed when bull bias reaches +3 or stronger
+_st_lbl_text = na(st_lbl) ? "" : label.get_text(st_lbl)
+_st_is_buy   = str.contains(_st_lbl_text, "QUICK BUY")
+_st_is_sell  = str.contains(_st_lbl_text, "QUICK SELL")
+if not na(st_lbl)
+    if (_st_is_buy  and bias_net <= -2) or (_st_is_sell and bias_net >= 2)
+        label.delete(st_lbl)
+        line.delete(st_tp)
+        line.delete(st_sl)
+        st_lbl := na
+        st_tp  := na
+        st_sl  := na
+
+// ── ALERT CONDITIONS — full JSON built in Pine Script ─────
+_sym_mode_str = _is_crypto ? "Crypto" : "Metals"
+_htf_str      = htf_strong_bull ? "UP_STRONG" : htf_bull ? "UP" : htf_strong_bear ? "DOWN_STRONG" : htf_bear ? "DOWN" : "NEUTRAL"
+_tl_score_val = not na(tl_fixed) ? math.round((tl_fixed - close) / atr200, 4) : 0.0
+_bias_dir_str = bias_net >= 2 ? "BIAS UP" : bias_net <= -2 ? "BIAS DOWN" : "NEUTRAL"
+
+_j_common = '"symbol":"' + syminfo.ticker + '"'
+          + ',"timeframe":"' + str.tostring(math.round(timeframe.in_seconds() / 60)) + '"'
+          + ',"price":' + str.tostring(math.round(close, 2))
+          + ',"atr":' + str.tostring(math.round(atr, 4))
+          + ',"rsi":' + str.tostring(math.round(rsi14, 2))
+          + ',"bias_score":' + str.tostring(bias_net)
+          + ',"bias_dir":"' + _bias_dir_str + '"'
+          + ',"a5_dist":' + str.tostring(math.round(math.abs(close - a5) / atr, 3))
+          + ',"stmn":' + str.tostring(stmn_bull or stmn_bear ? 1 : 0)
+          + ',"tma_lower":' + str.tostring(math.round(tma_lower, 2))
+          + ',"tma_middle":' + str.tostring(math.round(a5, 2))
+          + ',"tma_upper":' + str.tostring(math.round(tma_upper, 2))
+          + ',"buy_thresh":' + str.tostring(math.round(tad_buy_thresh, 2))
+          + ',"sell_thresh":' + str.tostring(math.round(tad_sell_thresh, 2))
+          + ',"tl_score":' + str.tostring(_tl_score_val)
+          + ',"sym_mode":"' + _sym_mode_str + '"'
+          + ',"htf":"' + _htf_str + '"'
+          + ',"projection":"' + proj_dir + '"'
+          + ',"do_nothing":' + str.tostring(_do_nothing_active ? 1 : 0)
+          + ',"dn_reason":"' + _do_nothing_reason + '"'
+          + ',"dn_watch":"'  + _do_nothing_watch  + '"'
+
+// ── TRACK PREVIOUS STATE for change detection ─────────────
+var string _prev_bias_dir = ""
+var string _prev_proj_dir = ""
+
+// ── SIGNAL ALERTS ─────────────────────────────────────────
+if tmn_bull_signal and tmn_cool
+    alert('{"signal":"TMN+",' + _j_common + '}', alert.freq_once_per_bar_close)
+
+if tmn_bear_signal and tmn_cool
+    alert('{"signal":"TMN-",' + _j_common + '}', alert.freq_once_per_bar_close)
+
+if not na(confirm_lbl) and confirm_dir == 1
+    alert('{"signal":"BUY",' + _j_common + '}', alert.freq_once_per_bar_close)
+
+if not na(confirm_lbl) and confirm_dir == -1
+    alert('{"signal":"SELL",' + _j_common + '}', alert.freq_once_per_bar_close)
+
+if ready_fired and last_peak_dir == -1
+    alert('{"signal":"TMN+ Watch",' + _j_common + '}', alert.freq_once_per_bar_close)
+
+if ready_fired and last_peak_dir == 1
+    alert('{"signal":"TMN- Watch",' + _j_common + '}', alert.freq_once_per_bar_close)
+
+// ── BIAS CHANGE ALERTS ────────────────────────────────────
+if barstate.isconfirmed
+    if _bias_dir_str != _prev_bias_dir and _prev_bias_dir != ""
+        alert('{"signal":"BIAS CHANGE","prev_bias":"' + _prev_bias_dir + '",' + _j_common + '}', alert.freq_once_per_bar_close)
+    _prev_bias_dir := _bias_dir_str
+
+// ── PROJECTION CHANGE ALERTS ──────────────────────────────
+if barstate.isconfirmed
+    if proj_dir != _prev_proj_dir and _prev_proj_dir != ""
+        alert('{"signal":"PROJ CHANGE","prev_proj":"' + _prev_proj_dir + '",' + _j_common + '}', alert.freq_once_per_bar_close)
+    _prev_proj_dir := proj_dir
+
+// ── DO NOTHING CHANGE ALERTS ──────────────────────────────
+var bool _prev_do_nothing = false
+if barstate.isconfirmed
+    if _do_nothing_active != _prev_do_nothing
+        alert('{"signal":"DO NOTHING",' + _j_common + '}', alert.freq_once_per_bar_close)
+    _prev_do_nothing := _do_nothing_active
+
+// ── STMN ON ALERTS (early warning before TMN fires) ───────
+// Only alert when STMN turns ON — not OFF
+// stmn_bear = price entered sell zone (above sell threshold)
+// stmn_bull = price entered buy zone (below buy threshold)
+var bool _prev_stmn_bear = false
+var bool _prev_stmn_bull = false
+if barstate.isconfirmed
+    if stmn_bear and not _prev_stmn_bear
+        alert('{"signal":"STMN-","zone":"ABOVE SELL THRESHOLD",' + _j_common + '}', alert.freq_once_per_bar_close)
+    if stmn_bull and not _prev_stmn_bull
+        alert('{"signal":"STMN+","zone":"BELOW BUY THRESHOLD",' + _j_common + '}', alert.freq_once_per_bar_close)
+    _prev_stmn_bear := stmn_bear
+    _prev_stmn_bull := stmn_bull

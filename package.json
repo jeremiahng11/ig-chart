@@ -1,0 +1,20 @@
+{
+  "name": "ig-charts",
+  "version": "1.0.0",
+  "description": "TradingView-style live charts for XAUUSD / BTCUSD (and any IG market) using the IG REST + Streaming API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "mock": "MOCK=1 node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "lightstreamer-client-node": "^9.2.2",
+    "lightweight-charts": "4.2.3",
+    "ws": "^8.18.0"
+  }
+}

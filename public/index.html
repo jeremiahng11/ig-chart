@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>IG Charts</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M8 1l7 7-7 7-7-7z' fill='%232962ff'/></svg>" />
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/trade.css" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#2962ff" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+</head>
+<body>
+  <div class="tabbar" id="tabbar"></div>
+  <header class="topbar" id="topbar">
+    <button class="tb-btn sym-btn" id="symBtn" title="Symbol search (start typing on the chart)"><svg class="ico" viewBox="0 0 18 18"><circle cx="7.5" cy="7.5" r="5" /><path d="M11.5 11.5L16 16" /></svg><span id="symName">—</span></button>
+    <button class="tb-btn icon" id="cmpBtn" title="Compare or add symbol"><svg class="ico" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5" /><path d="M9 5.5v7M5.5 9h7" /></svg></button>
+    <i class="tb-sep"></i>
+    <div class="tb-group" id="ivFav"></div>
+    <div class="dd" id="ivDD"><button class="tb-btn icon" id="ivBtn" title="Change interval">▾</button><div class="dd-menu hidden wide" id="ivMenu"></div></div>
+    <i class="tb-sep"></i>
+    <div class="dd" id="typeDD"><button class="tb-btn" id="typeBtn" title="Chart type"></button><div class="dd-menu hidden" id="typeMenu"></div></div>
+    <div class="dd" id="sideDD"><button class="tb-btn side-btn" id="sideBtn" title="Price data: bid, ask or mid">Mid</button><div class="dd-menu hidden" id="sideMenu"></div></div>
+    <i class="tb-sep"></i>
+    <button class="tb-btn" id="indBtn" title="Indicators, metrics and strategies ( / )"><svg class="ico" viewBox="0 0 18 18"><path d="M3 15c3-1 3-12 7-12M5 8h6M11 9l4 5M15 9l-4 5" /></svg><span class="tb-label">Indicators</span></button>
+    <div class="dd" id="tplDD"><button class="tb-btn icon" id="tplBtn" title="Indicator templates"><svg class="ico" viewBox="0 0 18 18"><path d="M3 3h12v4H3zM3 9h12v6H3z" /></svg></button><div class="dd-menu hidden" id="tplMenu"></div></div>
+    <div class="tb-group" id="acGroup"><button id="acToggle" title="AI Chance v1.3 on every chart (Bitcoin uses the crypto profile, gold the metals profile)">AI Chance</button><button id="acSettingsBtn" title="AI Chance settings">⚙</button></div>
+    <i class="tb-sep"></i>
+    <button class="tb-btn" id="alertBtn" title="Create alert (⌥A)"><svg class="ico" viewBox="0 0 18 18"><path d="M9 2.5c-2.8 0-4.5 2-4.5 4.8V11L3 13h12l-1.5-2V7.3C13.5 4.5 11.8 2.5 9 2.5zM7.3 15a1.8 1.8 0 003.4 0" /></svg><span class="tb-label">Alert</span></button>
+    <button class="tb-btn" id="replayBtn" title="Bar replay"><svg class="ico" viewBox="0 0 18 18"><path d="M3 3v12M6 4l9 5-9 5z" /></svg><span class="tb-label">Replay</span></button>
+    <div class="spacer"></div>
+    <button class="tb-btn icon" id="undoBtn" title="Undo (⌘Z)"><svg class="ico" viewBox="0 0 18 18"><path d="M6 4L2.5 7.5 6 11M3 7.5h7.5a4.5 4.5 0 010 9H8" /></svg></button>
+    <button class="tb-btn icon" id="redoBtn" title="Redo (⇧⌘Z)"><svg class="ico" viewBox="0 0 18 18"><path d="M12 4l3.5 3.5L12 11M15 7.5H7.5a4.5 4.5 0 000 9H10" /></svg></button>
+    <i class="tb-sep"></i>
+    <div class="dd" id="gridDD"><button class="tb-btn icon" id="gridBtn" title="Layout setup (up to 16 charts)"></button><div class="dd-menu hidden" id="gridMenu"></div></div>
+    <div class="dd" id="layoutsDD"><button class="tb-btn" id="layoutsBtn" title="Manage layouts"><span id="layoutName">Layout</span> ▾</button><div class="dd-menu hidden" id="layoutsMenu"></div></div>
+    <i class="tb-sep"></i>
+    <button class="tb-btn icon" id="settingsBtn" title="Chart settings"><svg class="ico" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.5" /><path d="M9 1.5v2.2M9 14.3v2.2M1.5 9h2.2M14.3 9h2.2M3.7 3.7l1.6 1.6M12.7 12.7l1.6 1.6M3.7 14.3l1.6-1.6M12.7 5.3l1.6-1.6" /></svg></button>
+    <div class="dd" id="shotDD"><button class="tb-btn icon" id="shotBtn" title="Snapshot and export (⌥S)"><svg class="ico" viewBox="0 0 18 18"><path d="M2.5 6h3l1.5-2h4l1.5 2h3v8.5h-13z" /><circle cx="9" cy="10" r="2.6" /></svg></button><div class="dd-menu hidden" id="shotMenu"></div></div>
+    <button class="tb-btn icon" id="themeBtn" title="Dark / light theme"><svg class="ico" viewBox="0 0 18 18"><path d="M14.5 11A6 6 0 017 3.5a6 6 0 107.5 7.5z" /></svg></button>
+    <button class="tb-btn icon" id="fsBtn" title="Fullscreen (⇧F)"><svg class="ico" viewBox="0 0 18 18"><path d="M2.5 6.5v-4h4M11.5 2.5h4v4M15.5 11.5v4h-4M6.5 15.5h-4v-4" /></svg></button>
+    <button class="tb-btn icon" id="helpBtn" title="Keyboard shortcuts (?)">?</button>
+    <div class="meta"><span id="modeBadge" class="badge">…</span><span class="stream"><i id="streamDot" class="dot"></i><span id="streamText">connecting</span></span></div>
+  </header>
+
+  <main class="layout" id="layout">
+    <nav class="lefttools" id="drawTools"></nav>
+    <section class="center">
+      <div class="grid" id="grid"></div>
+      <footer class="bottombar">
+        <div class="bb-group" id="rangeGroup"></div>
+        <button class="bb-btn" id="gotoBtn" title="Go to date">📅</button>
+        <button class="bb-btn" id="rtBtn" title="Scroll to the latest bar">⇥</button>
+        <div class="spacer"></div>
+        <a class="credit muted" href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer" title="Charting by TradingView Lightweight Charts™ (Apache 2.0)">Charts: TradingView Lightweight Charts™</a>
+        <span id="allowance" class="muted" title="IG historical data points remaining this week"></span>
+        <span id="clock" class="clock" title="Timezone — click to change"></span>
+        <div class="bb-group" id="scaleGroup">
+          <button data-scale="percent" title="Percentage scale">%</button>
+          <button data-scale="indexed" title="Indexed to 100 (first visible bar = 100)">100</button>
+          <button data-scale="log" title="Logarithmic scale">log</button>
+          <button data-scale="invert" title="Invert price scale">⇅</button>
+          <button data-scale="lock" title="Lock price-to-bar ratio (zooming keeps the same price per bar)">🔒</button>
+          <button data-scale="priceonly" title="Scale price chart only (indicators on the price pane don't stretch the scale)">P</button>
+          <button data-scale="auto" title="Auto-fit the price scale">auto</button>
+        </div>
+      </footer>
+      <section class="bpanel collapsed" id="bpanel">
+        <div class="bp-resize" id="bpResize"></div>
+        <div class="bp-tabs">
+          <button data-bp="strategy">Strategy Tester &amp; Scripts</button>
+          <button data-bp="paper">Paper Trading</button>
+          <button data-bp="screener">Screener</button>
+          <button data-bp="mt5">MT5 Account</button>
+          <div class="spacer"></div>
+          <button id="bpToggle" class="bp-toggle" title="Show / hide panel">▴</button>
+        </div>
+        <div class="bp-body">
+          <div class="bp-pane" data-pane="strategy"></div>
+          <div class="bp-pane" data-pane="paper"></div>
+          <div class="bp-pane" data-pane="screener"></div>
+          <div class="bp-pane" data-pane="mt5"></div>
+        </div>
+      </section>
+    </section>
+    <aside class="sidebar" id="sidebar">
+      <div class="sb-pane" data-sb="watchlist"></div>
+      <div class="sb-pane" data-sb="alerts"></div>
+      <div class="sb-pane" data-sb="tree"></div>
+      <div class="sb-pane" data-sb="news"></div>
+    </aside>
+    <nav class="sidebtns" id="sidebtns">
+      <button data-sb="watchlist" title="Watchlists and details"><svg class="ico" viewBox="0 0 18 18"><path d="M3 4h12M3 9h12M3 14h8" /></svg></button>
+      <button data-sb="alerts" title="Alerts"><svg class="ico" viewBox="0 0 18 18"><path d="M9 2.5c-2.8 0-4.5 2-4.5 4.8V11L3 13h12l-1.5-2V7.3C13.5 4.5 11.8 2.5 9 2.5zM7.3 15a1.8 1.8 0 003.4 0" /></svg></button>
+      <button data-sb="news" title="Economic calendar and news"><svg class="ico" viewBox="0 0 18 18"><path d="M3 4h12v11H3zM3 7h12M6 2.5v3M12 2.5v3M6 10h2M10 10h2M6 12.5h2" /></svg></button>
+      <button data-sb="tree" title="Object tree and data window"><svg class="ico" viewBox="0 0 18 18"><path d="M3 3h5v4H3zM10 11h5v4h-5zM5.5 7v6.5H10" /></svg></button>
+      <i class="lt-sep"></i>
+      <button data-bp="strategy" title="Strategy tester and script editor"><svg class="ico" viewBox="0 0 18 18"><path d="M2 15l4-5 3 3 7-9" /><path d="M12 4h4v4" /></svg></button>
+      <button data-bp="paper" title="Paper trading"><svg class="ico" viewBox="0 0 18 18"><path d="M3 13l3-3 3 2 6-6M3 16h12" /></svg></button>
+      <button data-bp="mt5" title="MT5 account (read-only)"><svg class="ico" viewBox="0 0 18 18"><path d="M2.5 14V4l3.5 5 3-5v10M12 4h3.5M13.75 4v10" /></svg></button>
+      <button data-bp="screener" title="Screener"><svg class="ico" viewBox="0 0 18 18"><path d="M2 3h14l-5 6v5l-4 2V9z" /></svg></button>
+    </nav>
+  </main>
+
+  <div id="modals"></div>
+
+  <script src="/vendor/lightweight-charts.js"></script>
+  <script src="/core.js"></script>
+  <script src="/aichance.js"></script>
+  <script src="/indicators.js"></script>
+  <script src="/charttypes.js"></script>
+  <script src="/drawings.js"></script>
+  <script src="/chartview.js"></script>
+  <script src="/pine.js"></script>
+  <script src="/strategy.js"></script>
+  <script src="/pine-render.js"></script>
+  <script src="/paper.js"></script>
+  <script src="/push.js"></script>
+  <script src="/mt5.js"></script>
+  <script src="/trade.js"></script>
+  <script src="/panels.js"></script>
+  <script src="/hotlists.js"></script>
+  <script src="/app.js"></script>
+  <script src="/notes.js"></script>
+  <script src="/stmn.js"></script>
+</body>
+</html>

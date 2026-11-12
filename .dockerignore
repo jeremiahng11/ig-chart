@@ -1,0 +1,9 @@
+node_modules
+.env
+.data
+.cache
+.git
+.vscode
+server.log
+pine
+*.md
