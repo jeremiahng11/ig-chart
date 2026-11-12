@@ -379,6 +379,9 @@ function streamResubscribe() {
       const prev = stream.last.get(epic) || {};
       for (const k of ['bid', 'offer', 'high', 'low', 'changePct', 'state']) if (tick[k] == null) tick[k] = prev[k] ?? null;
       stream.last.set(epic, tick);
+      const r = (stream.rate ||= new Map()).get(epic) || [];
+      r.push(tick.t); while (r.length && r[0] < tick.t - 60000) r.shift();
+      stream.rate.set(epic, r);
       broadcast(tick);
       alertsOnTick(tick);
     },
@@ -1289,7 +1292,8 @@ app.get('/api/status', wrap(async (req, res) => {
     itemMode: stream.itemMode || 'MARKET', subError: stream.subError || null,
     live: [...stream.epics].map((epic) => {
       const t = stream.last.get(epic);
-      return { epic, lastTickSecAgo: t ? Math.round((Date.now() - t.t) / 1000) : null, bid: t?.bid ?? null, offer: t?.offer ?? null, state: t?.state ?? null };
+      const ticksLastMin = (stream.rate?.get(epic) || []).filter((x) => x > Date.now() - 60000).length;
+      return { epic, ticksLastMin, lastTickSecAgo: t ? Math.round((Date.now() - t.t) / 1000) : null, bid: t?.bid ?? null, offer: t?.offer ?? null, state: t?.state ?? null };
     }),
   });
 }));
